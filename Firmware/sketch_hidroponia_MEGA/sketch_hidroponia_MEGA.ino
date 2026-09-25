@@ -1,3 +1,12 @@
+// ============================================================
+// VERSIÓN 25/09/2026
+//  - Relevador en estado seguro ANTES de configurar el pin
+//    (evita el pulso de encendido de la bomba al arrancar).
+//  - pedirConfig(): si la respuesta no trae la config del relay
+//    (error de red, 404, etc.), se conserva la configuración
+//    anterior en vez de caer a modo automático.
+// ============================================================
+
 #include <DHT.h>
 #include <EEPROM.h>
 #include "config.h"
@@ -125,6 +134,15 @@ void pedirConfig() {
 
     if (r.length() == 0) return;
 
+    // Si la respuesta no trae la config del relay (error de red,
+    // 404, "No autorizado", etc.), conservar la configuración
+    // anterior. Antes, cualquier error dejaba modoManual en false
+    // y la bomba pasaba sola a modo automático.
+    if (r.indexOf("\"relay\"") == -1) {
+        Serial.println(F("Config no valida: se conserva la anterior"));
+        return;
+    }
+
     // Parsear tiempo_on
     int idx = r.indexOf("\"tiempo_on\":");
     if (idx != -1) {
@@ -189,14 +207,19 @@ float leerUltrasonico() {
 // SETUP
 // ================================================================
 void setup() {
+    // Relevador en estado seguro ANTES de configurar el pin.
+    // Al hacer pinMode(OUTPUT), el pin toma el valor que ya tenga
+    // escrito; con HIGH primero, la bomba nunca recibe un pulso
+    // de encendido al arrancar (el módulo es activo en bajo).
+    digitalWrite(RELAY_PIN, RELAY_OFF);
+    pinMode(RELAY_PIN, OUTPUT);
+
     Serial.begin(BAUD_DEBUG);
     Serial1.begin(BAUD_ESP);   // comunicación con ESP32
 
     dht.begin();
     pinMode(TRIG_PIN, OUTPUT);
     pinMode(ECHO_PIN, INPUT);
-    pinMode(RELAY_PIN, OUTPUT);
-    digitalWrite(RELAY_PIN, RELAY_OFF); // relay apagado al inicio
 
     Serial.println(F("=== Iniciando sistema ==="));
     Serial.println(F("Esperando que el ESP32 conecte al WiFi..."));
