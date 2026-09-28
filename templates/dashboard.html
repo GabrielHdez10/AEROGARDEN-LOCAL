@@ -962,7 +962,6 @@
     <div style="margin-bottom: 16px;">
         <button onclick="abrirModal('modal-siembra')" data-i18n="cult_registrar_siembra">🌱 Registrar Siembra</button>
         <button onclick="abrirModal('modal-cosecha')" data-i18n="cult_registrar_cosecha">🌾 Registrar Cosecha</button>
-        <button class="btn-verde" onclick="abrirModal('modal-tipo-cultivo')" data-i18n="cult_agregar_tipo">+ Agregar Tipo de Cultivo</button>
     </div>
 
     
@@ -1244,7 +1243,7 @@
                 <summary style="font-weight:600; color:#1a3d2b; font-size:14px;">🌱 ¿Cómo registro mis cultivos y cosechas?</summary>
                 <p style="margin-top:10px; font-size:13px; color:#555; line-height:1.7;">
                     Ve a la sección <strong>Cultivos</strong>.<br>
-                    Primero agrega un <strong>Tipo de Cultivo</strong> (ej: Lechuga, Tomate) si aún no existe.<br>
+                    El sistema maneja dos cultivos: <strong>Cilantro</strong> y <strong>Perejil</strong>.<br>
                     Luego usa <strong>Registrar Siembra</strong> para crear un cultivo activo.<br>
                     Cuando coseches, usa <strong>Registrar Cosecha</strong> y selecciona el cultivo correspondiente.<br>
                     En <strong>Analítica</strong> podrás ver reportes y gráficas de tus cultivos y cosechas.
@@ -1481,26 +1480,11 @@
 </div>
 
 
-<div id="modal-tipo-cultivo" class="modal-overlay">
-    <div class="modal">
-        <h3 data-i18n="modal_tipo_planta">Registrar Nuevo Tipo de Planta</h3>
-        <label data-i18n="modal_nombre_planta">Nombre de la planta</label>
-        <input type="text" id="nombrePlanta" placeholder="Ej: Tomate Cherry">
-        <label data-i18n="modal_desc_planta">Descripción</label>
-        <input type="text" id="descPlanta" placeholder="Breve descripción">
-        <div class="modal-botones">
-            <button onclick="guardarTipoCultivo()" data-i18n="modal_guardar_planta">Guardar Planta</button>
-            <button onclick="cerrarModal('modal-tipo-cultivo')" data-i18n="modal_cancelar">Cancelar</button>
-        </div>
-    </div>
-</div>
-
-
 <div id="modal-siembra" class="modal-overlay">
     <div class="modal">
         <h3 data-i18n="modal_siembra">Registrar Siembra</h3>
         <label data-i18n="modal_nombre_var">Nombre / Variedad</label>
-        <input type="text" id="nombreCultivo" placeholder="Ej: Lechuga Romana">
+        <input type="text" id="nombreCultivo" placeholder="Ej: Cilantro lote 1">
         <label data-i18n="modal_tipo_cultivo">Tipo de Cultivo</label>
         <select id="selectTipoCultivo"></select>
         <label data-i18n="modal_fecha_siembra">Fecha de siembra</label>
@@ -1612,7 +1596,7 @@
         <h3>✏️ Editar Cultivo</h3>
         <input type="hidden" id="editCultivoId">
         <label data-i18n="modal_nombre_var">Nombre / Variedad</label>
-        <input type="text" id="editNombreCultivo" placeholder="Ej: Lechuga Romana">
+        <input type="text" id="editNombreCultivo" placeholder="Ej: Cilantro lote 1">
         <label>Tipo de Cultivo</label>
         <select id="editTipoCultivo"></select>
         <label>Fecha de siembra</label>

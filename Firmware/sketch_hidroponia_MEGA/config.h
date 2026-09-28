@@ -39,7 +39,10 @@
 #define BAUD_DEBUG        9600     // Serial: monitor USB
 #define BAUD_ESP          115200   // Serial1: enlace con el ESP8266
 #define TIMEOUT_ESP       8000     // ms de espera por respuesta
-#define ESPERA_ARRANQUE   6000     // ms para que el ESP conecte al WiFi
+#define ESPERA_ESP_MAX    20000    // ms MÁXIMOS esperando a que el ESP conecte al WiFi
+                                   // (ya no es una espera fija: se sale en cuanto el ESP responde "listo")
+#define PING_ESP_INTERVALO 500     // ms entre PING al ESP mientras se espera
+#define ESPERA_MIN_DHT    2500     // ms desde el encendido antes de la 1a lectura del DHT22
 
 // ── EEPROM ──────────────────────────────────────────────────
 // El byte mágico distingue una EEPROM virgen (0xFF) de una

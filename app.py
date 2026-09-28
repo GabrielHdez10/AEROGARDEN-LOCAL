@@ -1180,6 +1180,23 @@ def obtener_analitica(id_sensor, rango):
         return jsonify({"error": str(e)}), 500
 
 
+# ── Cultivos permitidos ─────────────────────────────────────────────
+# El sistema solo maneja estos dos cultivos. Se valida aquí (backend) y
+# no solo en la interfaz, para que nadie pueda saltarse la restricción.
+CULTIVOS_PERMITIDOS = ('cilantro', 'perejil')
+_SQL_PERMITIDOS = "(" + ",".join("'%s'" % c for c in CULTIVOS_PERMITIDOS) + ")"
+
+
+def tipo_cultivo_permitido(cursor, id_tipo):
+    """True si el idTipo_Cultivo corresponde a Cilantro o Perejil."""
+    cursor.execute(
+        "SELECT 1 FROM tipo_cultivo WHERE idTipo_Cultivo = %s "
+        "AND LOWER(nombre_planta) IN " + _SQL_PERMITIDOS,
+        (id_tipo,)
+    )
+    return cursor.fetchone() is not None
+
+
 @app.route('/api/cultivos/sembrar', methods=['POST'])
 @login_requerido
 def sembrar_cultivo():
@@ -1191,6 +1208,9 @@ def sembrar_cultivo():
         conexion = conectar_bd()
         cursor   = conexion.cursor()
         id_u     = get_id_usuario()
+        if not tipo_cultivo_permitido(cursor, data['idTipo']):
+            cursor.close(); conexion.close()
+            return jsonify({"error": "Solo se pueden sembrar Cilantro o Perejil"}), 400
         cursor.execute(
             """INSERT INTO cultivos (nombreCultivo, fecha_siembra, cantidad, tamano_planta,
                                      idTipo_Cultivo, idSistema, idUsuario)
@@ -1237,6 +1257,9 @@ def editar_cultivo(id_cultivo):
         conexion = conectar_bd()
         cursor   = conexion.cursor()
         id_u     = get_id_usuario()
+        if not tipo_cultivo_permitido(cursor, data['idTipo']):
+            cursor.close(); conexion.close()
+            return jsonify({"error": "Solo se pueden manejar Cilantro o Perejil"}), 400
         cursor.execute("""
             UPDATE cultivos
             SET nombreCultivo=%s, fecha_siembra=%s, cantidad=%s,
@@ -1273,7 +1296,10 @@ def obtener_tipos_cultivo():
     try:
         conexion = conectar_bd()
         cursor   = conexion.cursor(dictionary=True)
-        cursor.execute("SELECT idTipo_Cultivo, nombre_planta FROM tipo_cultivo")
+        cursor.execute(
+            "SELECT idTipo_Cultivo, nombre_planta FROM tipo_cultivo "
+            "WHERE LOWER(nombre_planta) IN " + _SQL_PERMITIDOS + " ORDER BY nombre_planta"
+        )
         tipos = cursor.fetchall()
         cursor.close(); conexion.close()
         return jsonify(tipos)
@@ -1284,19 +1310,8 @@ def obtener_tipos_cultivo():
 @app.route('/api/tipo_cultivo/agregar', methods=['POST'])
 @login_requerido
 def agregar_tipo_cultivo():
-    data = request.json
-    try:
-        conexion = conectar_bd()
-        cursor   = conexion.cursor()
-        cursor.execute(
-            "INSERT INTO tipo_cultivo (nombre_planta, descripcion) VALUES (%s, %s)",
-            (data['nombre'], data['descripcion'])
-        )
-        conexion.commit()
-        cursor.close(); conexion.close()
-        return jsonify({"status": "success", "message": "Tipo de cultivo agregado correctamente"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    # Deshabilitado: el catálogo es fijo (Cilantro y Perejil, ver migración 002).
+    return jsonify({"error": "El catálogo de cultivos es fijo: solo Cilantro y Perejil"}), 403
 
 
 @app.route('/api/cosechas/registrar', methods=['POST'])

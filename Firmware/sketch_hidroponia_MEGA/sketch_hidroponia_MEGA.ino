@@ -1,4 +1,11 @@
 // ============================================================
+// VERSIÓN 28/09/2026
+//  - ARRANQUE: se elimina el delay fijo de 6 s. Ahora el Mega hace
+//    PING al ESP8266 y continúa en cuanto éste confirma WiFi
+//    conectado (máximo ESPERA_ESP_MAX). Requiere el sketch del
+//    ESP8266 actualizado (responde a "PING").
+//  - La primera lectura/envío ocurre de inmediato al terminar el
+//    arranque (antes esperaba hasta llegar a 10 s de uptime).
 // VERSIÓN 25/09/2026
 //  - Relevador en estado seguro ANTES de configurar el pin
 //    (evita el pulso de encendido de la bomba al arrancar).
@@ -69,6 +76,34 @@ String enviarAlESP32(String cmd, int timeoutMs = TIMEOUT_ESP) {
     resp.trim();
     Serial.print(F("[ESP32->] ")); Serial.println(resp);
     return resp;
+}
+
+// ================================================================
+// ESPERAR AL ESP8266 (reemplaza el delay fijo de arranque)
+// El ESP responde a "PING" con {"pong":true,"wifi":true|false}.
+// Devuelve true en cuanto el ESP reporta WiFi conectado.
+// ================================================================
+bool esperarESP(unsigned long maxMs) {
+    unsigned long t0 = millis();
+    while (millis() - t0 < maxMs) {
+        while (Serial1.available()) Serial1.read();
+        Serial1.println(F("PING"));
+
+        String resp = "";
+        unsigned long t = millis();
+        while (millis() - t < PING_ESP_INTERVALO) {
+            while (Serial1.available()) {
+                char c = Serial1.read();
+                resp += c;
+                if (c == '\n' && resp.indexOf("\"pong\"") != -1) goto respondio;
+            }
+        }
+        respondio:
+        if (resp.indexOf("\"pong\"") != -1 && resp.indexOf("\"wifi\":true") != -1) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // ================================================================
@@ -222,10 +257,18 @@ void setup() {
     pinMode(ECHO_PIN, INPUT);
 
     Serial.println(F("=== Iniciando sistema ==="));
-    Serial.println(F("Esperando que el ESP32 conecte al WiFi..."));
+    Serial.println(F("Esperando que el ESP8266 conecte al WiFi..."));
 
-    // Dar tiempo al ESP32 para conectarse al WiFi
-    delay(ESPERA_ARRANQUE);
+    // Espera activa: sale en cuanto el ESP confirma WiFi (o al agotar el máximo)
+    unsigned long tEsp = millis();
+    if (esperarESP(ESPERA_ESP_MAX)) {
+        Serial.print(F("ESP listo en ")); Serial.print(millis() - tEsp); Serial.println(F(" ms"));
+    } else {
+        Serial.println(F("ESP sin respuesta/WiFi tras la espera maxima; se continua (reintentara solo)"));
+    }
+
+    // El DHT22 necesita ~2 s desde el encendido para dar una lectura valida
+    if (millis() < ESPERA_MIN_DHT) delay(ESPERA_MIN_DHT - millis());
 
     // Intentar leer device_id guardado en EEPROM
     deviceId = leerDeviceIdEEPROM();
@@ -241,6 +284,9 @@ void setup() {
             Serial.println(F("ERROR: no se pudo emparejar. Verifica el PAIRING_CODE."));
         }
     }
+
+    // Que el primer envio ocurra ya, sin esperar los 10 s del intervalo
+    ultimoCiclo = millis() - INTERVALO_DATOS;
 }
 
 // ================================================================

@@ -10,47 +10,52 @@ const char* WIFI_PASS = "itsx-2025";
 
 const char* SERVER_HOST = "https://web-production-4a25c.up.railway.app";
 
+// Control de reconexión sin bloquear el loop
+unsigned long tUltimoIntento = 0;
+const unsigned long REINTENTO_WIFI_MS = 10000UL;
+
 void setup() {
     // Serial del ESP826
     Serial.begin(115200);
-    delay(1000);
+    delay(200);
 
     Serial.println("=== ESP8266 Puente WiFi ===");
     Serial.print("Conectando a "); Serial.println(WIFI_SSID);
 
+    // Conexión NO bloqueante: el loop ya atiende los PING del Mega
+    // (responde wifi:false) mientras se conecta, y el Mega avanza en
+    // cuanto llega wifi:true. Antes esto bloqueaba hasta 15 s.
     WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
-
-    int intentos = 0;
-    while (WiFi.status() != WL_CONNECTED && intentos < 30) {
-        delay(500);
-        intentos++;
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("WiFi Conectado!");
-        Serial.print("IP: "); Serial.println(WiFi.localIP());
-    } else {
-        Serial.println("ERROR: No se pudo conectar al WiFi");
-    }
+    tUltimoIntento = millis();
 }
 
 void loop() {
-    // Reconectar WiFi si se pierde
+    // Reconectar WiFi si se pierde (sin bloquear: reintenta cada 10 s)
     if (WiFi.status() != WL_CONNECTED) {
-        WiFi.begin(WIFI_SSID, WIFI_PASS);
-        int intentos = 0;
-        while (WiFi.status() != WL_CONNECTED && intentos < 20) {
-            delay(500);
-            intentos++;
+        if (millis() - tUltimoIntento >= REINTENTO_WIFI_MS) {
+            WiFi.disconnect();
+            WiFi.begin(WIFI_SSID, WIFI_PASS);
+            tUltimoIntento = millis();
         }
     }
+    // (No se imprime nada en Serial desde el loop: esa línea es el enlace
+    //  con el Mega y un texto suelto se confundiría con una respuesta.)
 
     // Leer comando del Mega
     if (Serial.available()) {
         String linea = Serial.readStringUntil('\n');
         linea.trim();
         if (linea.length() == 0) return;
+
+        // Sondeo de arranque: el Mega pregunta si ya hay WiFi
+        if (linea == "PING") {
+            Serial.println(WiFi.status() == WL_CONNECTED
+                           ? "{\"pong\":true,\"wifi\":true}"
+                           : "{\"pong\":true,\"wifi\":false}");
+            return;
+        }
 
         String respuesta = procesarComando(linea);
         Serial.println(respuesta);

@@ -125,12 +125,13 @@ CREATE TABLE IF NOT EXISTS `tipo_cultivo` (
   PRIMARY KEY (`idTipo_Cultivo`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-INSERT INTO `tipo_cultivo` (`nombre_planta`, `descripcion`) VALUES
-  ('Lechuga', 'Hoja verde de ciclo corto'),
-  ('Albahaca', 'Hierba aromática'),
-  ('Tomate', 'Fruto de ciclo medio'),
-  ('Espinaca', 'Hoja verde rica en hierro'),
-  ('Cilantro', 'Hierba aromática de uso culinario');
+INSERT INTO `tipo_cultivo` (`nombre_planta`, `descripcion`)
+SELECT 'Cilantro', 'Hierba aromática de uso culinario' FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM `tipo_cultivo` WHERE LOWER(`nombre_planta`) = 'cilantro');
+
+INSERT INTO `tipo_cultivo` (`nombre_planta`, `descripcion`)
+SELECT 'Perejil', 'Hierba aromática de hoja lisa o rizada' FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM `tipo_cultivo` WHERE LOWER(`nombre_planta`) = 'perejil');
 
 CREATE TABLE IF NOT EXISTS `cultivos` (
   `idCultivo` INT NOT NULL AUTO_INCREMENT,
