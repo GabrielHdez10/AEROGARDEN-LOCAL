@@ -1,5 +1,9 @@
-from flask import Flask, jsonify, request, render_template, session, redirect, url_for
+# HYDROSENSE - RANGOS INTEGRADOS - 29/09/2026
+from flask import Flask, jsonify, request, render_template, render_template_string, session, redirect, url_for
 from functools import wraps
+from contextlib import contextmanager
+import math
+import unicodedata
 from flask_cors import CORS
 from dotenv import load_dotenv
 import mysql.connector
@@ -246,7 +250,13 @@ def set_relay(device_id: int, data: dict):
 
 
 def convertir_valor(raw, tipo_conv):
+    if isinstance(raw, bool) or raw is None:
+        raise ValueError("Lectura no numerica")
     v = float(raw)
+    if not math.isfinite(v):
+        raise ValueError("La lectura debe ser un numero finito")
+    if tipo_conv in ('ph', 'luz') and not 0 <= v <= 1023:
+        raise ValueError("Lectura analogica fuera de 0-1023")
     if tipo_conv == "ph":
         voltaje = v * (5.0 / 1023.0)
         ph = 7.0 + ((2.5 - voltaje) / 0.18)
@@ -257,9 +267,14 @@ def convertir_valor(raw, tipo_conv):
 
 
 def guardar_lectura_bd(id_sensor, valor):
+    conexion = cursor = None
     try:
         conexion = conectar_bd()
         cursor   = conexion.cursor(dictionary=True)
+        # Serializa lecturas del mismo sensor, incluso con varios procesos Flask.
+        cursor.execute("SELECT idSensore FROM sensores WHERE idSensore=%s FOR UPDATE", (id_sensor,))
+        if not cursor.fetchone():
+            raise ValueError("Sensor no encontrado")
         cursor.execute(
             "INSERT INTO registro_sensores (idSensor, valor, fecha_hora) VALUES (%s, %s, NOW())",
             (id_sensor, valor)
@@ -272,23 +287,33 @@ def guardar_lectura_bd(id_sensor, valor):
         for p in cursor.fetchall():
             umbral  = float(p['valor_umbral'])
             cond    = p['condicion']
-            disparo = (
-                (cond == 'mayor_que' and valor > umbral) or
-                (cond == 'menor_que' and valor < umbral) or
-                (cond == 'igual_a'   and valor == umbral)
-            )
+            disparo = cumple_condicion(valor, cond, umbral)
             if disparo:
+                cursor.execute("""
+                    SELECT idHistorial FROM historial_alertas
+                    WHERE idParametro=%s AND estado IN ('nueva', 'vista')
+                    ORDER BY idHistorial LIMIT 1
+                """, (p['idParametro'],))
+                if cursor.fetchone():
+                    continue
                 msg = f"Sensor {id_sensor}: valor {valor} {cond.replace('_',' ')} umbral {umbral}"
                 cursor.execute("""
                     INSERT INTO historial_alertas
                         (idParametro, idSensor, valor_detectado, prioridad, estado, mensaje)
                     VALUES (%s, %s, %s, %s, 'nueva', %s)
                 """, (p['idParametro'], id_sensor, valor, p['prioridad'], msg))
+            else:
+                resolver_incidentes(cursor, p['idParametro'])
         conexion.commit()
-        cursor.close()
-        conexion.close()
-    except Exception as e:
-        print(f"[BD ERROR] {e}")
+    except Exception:
+        if conexion is not None:
+            conexion.rollback()
+        raise
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if conexion is not None:
+            conexion.close()
 
 
 ARDUINO_TOKEN = os.environ.get("ARDUINO_TOKEN", "ag_hw_tk_8f2a")
@@ -300,6 +325,8 @@ TIPO_CONV_MAP = {
     "luz":         "luz",
     "nivel agua":  None,
     "distancia":   None,
+    "ec":          None,  # El firmware debe enviar EC calibrada en la unidad registrada.
+    "temperatura_agua": None,
 }
 
 
@@ -1104,37 +1131,22 @@ def verificar_estado(id_sensor):
 @login_requerido
 def datos_actuales(id_sensor):
     try:
-        id_u     = get_id_usuario()
-        conexion = conectar_bd()
-        cursor   = conexion.cursor(dictionary=True)
-        cursor.execute("""
-            SELECT s.idSensore, s.unidad_medida FROM sensores s
-            INNER JOIN dispositivos d ON s.idDispositivo = d.idDispositivo
-            WHERE s.idSensore = %s AND (
-                d.idUsuario = %s OR
-                EXISTS (SELECT 1 FROM dispositivo_miembros dm
-                        WHERE dm.idDispositivo = d.idDispositivo AND dm.idUsuario = %s)
-            )
-        """, (id_sensor, id_u, id_u))
-        sensor = cursor.fetchone()
-        if not sensor:
-            cursor.close(); conexion.close()
-            return jsonify({"error": "Sensor no encontrado"}), 404
-
-        cursor.execute(
-            "SELECT valor, fecha_hora FROM registro_sensores WHERE idSensor = %s ORDER BY fecha_hora DESC LIMIT 1",
-            (id_sensor,)
-        )
-        dato = cursor.fetchone()
-        cursor.close(); conexion.close()
-
-        if not dato:
-            return jsonify({"error": "Sin datos disponibles para este sensor"}), 404
-
-        fecha_str = dato['fecha_hora'].strftime('%Y-%m-%d %H:%M:%S') if isinstance(dato['fecha_hora'], datetime) else str(dato['fecha_hora'])
-        return jsonify({"valor": dato['valor'], "unidad": sensor['unidad_medida'], "fecha_hora": fecha_str})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        id_u = get_id_usuario()
+        with sesion_rangos() as (_, cursor):
+            cursor.execute("SELECT idDispositivo, unidad_medida FROM sensores WHERE idSensore=%s", (id_sensor,))
+            sensor = cursor.fetchone()
+            if not sensor or not permiso_rangos(cursor, sensor['idDispositivo'], id_u):
+                return jsonify(error='Sensor no encontrado'), 404
+            cursor.execute("""SELECT valor, fecha_hora FROM registro_sensores WHERE idSensor=%s
+                              ORDER BY fecha_hora DESC, idRegistro_sensor DESC LIMIT 1""", (id_sensor,))
+            dato = cursor.fetchone()
+            if not dato:
+                return jsonify(error='Sin datos disponibles para este sensor'), 404
+            resultado = evaluar_lectura(dato['valor'], dato['fecha_hora'], reglas_sensor(cursor, id_sensor))
+            return jsonify(dict(resultado, valor=dato['valor'], unidad=sensor['unidad_medida']))
+    except Exception:
+        app.logger.exception('Error consultando lectura actual')
+        return jsonify(error='No se pudo consultar la lectura actual.'), 500
 
 
 @app.route('/api/sensores/analitica/<int:id_sensor>/<rango>', methods=['GET'])
@@ -1899,6 +1911,611 @@ def mis_accesos():
         return jsonify(accesos)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# =====================================================================
+# HYDROSENSE: perfiles por dispositivo, rangos y evaluacion de lecturas.
+# El catalogo existente conserva solo cultivo/etapa/variable/min/max/unidad.
+# =====================================================================
+
+ETAPAS_RANGO = ('general', 'inicial', 'desarrollo', 'media', 'final')
+PERFILES_RANGO = ('cilantro', 'perejil', 'compartido')
+VARIABLE_SENSOR = {
+    'temperatura': 'temperatura', 'humedad': 'humedad', 'ph': 'ph',
+    'luz': 'luz_ldr', 'distancia': 'distancia', 'ec': 'ec',
+    'temperatura_agua': 'temperatura_agua',
+}
+VARIABLES_COMUNES = {'temperatura', 'humedad', 'temperatura_agua', 'luz_ldr', 'distancia'}
+NOMBRES_RANGO = {
+    'temperatura': ('Hydrosense: temperatura baja', 'Hydrosense: temperatura alta'),
+    'humedad': ('Hydrosense: humedad baja', 'Hydrosense: humedad alta'),
+    'ph': ('Hydrosense: pH bajo', 'Hydrosense: pH alto'),
+    'luz': ('Hydrosense: luz baja', 'Hydrosense: luz alta'),
+    'distancia': ('Hydrosense: agua muy alta', 'Hydrosense: agua baja'),
+    'ec': ('Hydrosense: EC baja', 'Hydrosense: EC alta'),
+    'temperatura_agua': ('Hydrosense: agua fria', 'Hydrosense: agua caliente'),
+}
+NOMBRES_ANTERIORES = {
+    'luz': ('Hydrosense: luz baja (pendiente)', 'Hydrosense: luz alta (pendiente)'),
+    'distancia': ('Hydrosense: agua muy alta (pendiente)', 'Hydrosense: agua baja (pendiente)'),
+    'ec': ('Hydrosense: EC baja etapa media', 'Hydrosense: EC alta etapa media'),
+    'temperatura_agua': ('Hydrosense: agua fria (guia general)', 'Hydrosense: agua caliente (guia general)'),
+}
+
+
+@contextmanager
+def sesion_rangos():
+    conexion = conectar_bd()
+    cursor = None
+    try:
+        cursor = conexion.cursor(dictionary=True)
+        yield conexion, cursor
+    except Exception:
+        conexion.rollback()
+        raise
+    finally:
+        if cursor is not None:
+            cursor.close()
+        conexion.close()
+
+
+def cumple_condicion(valor, condicion, umbral):
+    return ((condicion == 'menor_que' and valor < umbral) or
+            (condicion == 'mayor_que' and valor > umbral) or
+            (condicion == 'igual_a' and valor == umbral))
+
+
+def resolver_incidentes(cursor, id_parametro):
+    cursor.execute("""
+        UPDATE historial_alertas SET estado='resuelta', fecha_resolucion=NOW()
+        WHERE idParametro=%s AND estado IN ('nueva', 'vista')
+    """, (id_parametro,))
+
+
+def evaluar_reglas(valor, reglas):
+    activas = [p for p in reglas if p['activo']]
+    inferiores = [float(p['valor_umbral']) for p in activas if p['condicion'] == 'menor_que']
+    superiores = [float(p['valor_umbral']) for p in activas if p['condicion'] == 'mayor_que']
+    minimo = max(inferiores) if inferiores else None
+    maximo = min(superiores) if superiores else None
+    resultado = {'minimo': minimo, 'maximo': maximo,
+                 'alertas_activas': bool(activas), 'reglas_disparadas': []}
+    if valor is None:
+        estado = 'sin_datos'
+    elif not math.isfinite(float(valor)):
+        estado = 'lectura_invalida'
+    elif minimo is not None and maximo is not None and minimo > maximo:
+        estado = 'rango_inconsistente'
+    elif not activas:
+        estado = 'sin_alertas_activas'
+    else:
+        resultado['reglas_disparadas'] = [p['idParametro'] for p in activas
+            if cumple_condicion(float(valor), p['condicion'], float(p['valor_umbral']))]
+        estado = ('bajo' if minimo is not None and float(valor) < minimo else
+                  'alto' if maximo is not None and float(valor) > maximo else
+                  'alerta' if resultado['reglas_disparadas'] else 'en_rango')
+    resultado['estado_rango'] = estado
+    return resultado
+
+
+def evaluar_lectura(valor, fecha, reglas):
+    resultado = evaluar_reglas(valor, reglas)
+    if isinstance(fecha, datetime):
+        if fecha < datetime.now() - timedelta(minutes=5):
+            resultado['estado_rango'] = 'sin_datos_recientes'
+        fecha = fecha.strftime('%Y-%m-%d %H:%M:%S')
+    resultado['fecha_hora'] = fecha
+    return resultado
+
+
+def reglas_sensor(cursor, id_sensor):
+    cursor.execute("""SELECT idParametro, nombre, condicion, valor_umbral, prioridad, activo
+                      FROM parametros_alerta WHERE idSensor=%s ORDER BY idParametro""", (id_sensor,))
+    return cursor.fetchall()
+
+
+def permiso_rangos(cursor, device_id, id_usuario):
+    if id_usuario is None:
+        return None
+    cursor.execute("""
+        SELECT d.idDispositivo, d.nombre,
+               (d.idUsuario=%s OR EXISTS (
+                   SELECT 1 FROM dispositivo_miembros dm
+                   WHERE dm.idDispositivo=d.idDispositivo AND dm.idUsuario=%s
+                     AND dm.permiso='controlar')) AS puede_editar
+        FROM dispositivos d
+        WHERE d.idDispositivo=%s AND (d.idUsuario=%s OR EXISTS (
+            SELECT 1 FROM dispositivo_miembros dm
+            WHERE dm.idDispositivo=d.idDispositivo AND dm.idUsuario=%s))
+    """, (id_usuario, id_usuario, device_id, id_usuario, id_usuario))
+    return cursor.fetchone()
+
+
+def validar_perfil(cultivo, etapa):
+    if cultivo not in PERFILES_RANGO or etapa not in ETAPAS_RANGO:
+        raise ValueError('Selecciona un cultivo y una etapa validos.')
+
+
+def leer_catalogo(cursor):
+    try:
+        cursor.execute("""SELECT cultivo, etapa, variable, minimo, maximo, unidad
+                          FROM rangos_referencia_hydrosense""")
+        return cursor.fetchall()
+    except mysql.connector.Error as error:
+        if error.errno == 1146:
+            raise ValueError('Falta el catalogo de rangos. Ejecuta la migracion 003.') from error
+        raise
+
+
+def leer_perfil(cursor, device_id):
+    try:
+        cursor.execute("SELECT cultivo, etapa FROM perfil_rangos_dispositivo WHERE idDispositivo=%s", (device_id,))
+        return cursor.fetchone()
+    except mysql.connector.Error as error:
+        if error.errno == 1146:
+            return None
+        raise
+
+
+def asegurar_tabla_perfil(cursor):
+    # DDL solo al guardar expresamente un perfil; no se ejecuta al arrancar Flask.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS perfil_rangos_dispositivo (
+            idDispositivo INT NOT NULL PRIMARY KEY,
+            cultivo VARCHAR(20) NOT NULL,
+            etapa VARCHAR(25) NOT NULL,
+            actualizado_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (idDispositivo) REFERENCES dispositivos(idDispositivo) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """)
+
+
+def unidad_normalizada(unidad):
+    unidad = str(unidad or '').replace('µ', 'u').replace('μ', 'u').lower()
+    unidad = ''.join(c for c in unicodedata.normalize('NFKD', unidad) if not unicodedata.combining(c))
+    return unidad.replace('°', '').replace(' ', '')
+
+
+def factor_unidades(origen, destino):
+    origen, destino = unidad_normalizada(origen), unidad_normalizada(destino)
+    if origen and origen == destino:
+        return 1.0
+    return {('us/cm', 'ms/cm'): 0.001, ('ms/cm', 'us/cm'): 1000.0}.get((origen, destino))
+
+
+def rango_referencia(filas, cultivo, etapa, variable):
+    indice = {(r['cultivo'], r['etapa'], r['variable']): r for r in filas}
+
+    def buscar(planta):
+        exacto = indice.get((planta, etapa, variable))
+        return exacto if exacto is not None else indice.get((planta, 'general', variable))
+
+    fila = buscar(cultivo)
+    if fila is None and variable in VARIABLES_COMUNES:
+        fila = buscar('compartido')
+    if fila is None and cultivo == 'compartido' and variable not in VARIABLES_COMUNES:
+        a, b = buscar('cilantro'), buscar('perejil')
+        if a is not None and b is not None:
+            ra = rango_referencia(filas, 'cilantro', etapa, variable)
+            rb = rango_referencia(filas, 'perejil', etapa, variable)
+            factor = factor_unidades(rb['unidad'], ra['unidad'])
+            if ra['disponible'] and rb['disponible'] and factor is not None:
+                minimo = max(ra['minimo'], rb['minimo'] * factor)
+                maximo = min(ra['maximo'], rb['maximo'] * factor)
+                if minimo <= maximo:
+                    return {'minimo': minimo, 'maximo': maximo, 'unidad': ra['unidad'],
+                            'disponible': True, 'detalle': 'Intervalo comun de ambas plantas.'}
+                return {'minimo': None, 'maximo': None, 'unidad': ra['unidad'],
+                        'disponible': False, 'detalle': 'Los intervalos no coinciden en esta etapa.'}
+    if fila is None:
+        return {'minimo': None, 'maximo': None, 'unidad': '', 'disponible': False,
+                'detalle': 'No hay limites para esta combinacion de cultivo y etapa.'}
+    minimo, maximo = fila['minimo'], fila['maximo']
+    valido = (minimo is not None and maximo is not None and
+              math.isfinite(float(minimo)) and math.isfinite(float(maximo)) and minimo <= maximo)
+    return {'minimo': float(minimo) if valido else None, 'maximo': float(maximo) if valido else None,
+            'unidad': fila['unidad'], 'disponible': valido,
+            'detalle': '' if valido else 'Limites pendientes o inconsistentes en el catalogo.'}
+
+
+def nombres_gestionados(tipo):
+    return NOMBRES_RANGO.get(tipo, ()) + NOMBRES_ANTERIORES.get(tipo, ())
+
+
+def construir_previa(cursor, device_id, cultivo, etapa):
+    filas = leer_catalogo(cursor)
+    cursor.execute("SELECT idSensore, tipo_sensor, unidad_medida FROM sensores WHERE idDispositivo=%s ORDER BY idSensore", (device_id,))
+    sensores = cursor.fetchall()
+    cursor.execute("""SELECT p.* FROM parametros_alerta p JOIN sensores s ON p.idSensor=s.idSensore
+                      WHERE s.idDispositivo=%s ORDER BY p.idParametro""", (device_id,))
+    parametros = cursor.fetchall()
+    items = []
+    for s in sensores:
+        tipo = s['tipo_sensor'].strip().lower()
+        variable = VARIABLE_SENSOR.get(tipo)
+        ref = rango_referencia(filas, cultivo, etapa, variable) if variable else {
+            'minimo': None, 'maximo': None, 'unidad': '', 'disponible': False,
+            'detalle': 'Este tipo de sensor no tiene una variable asociada.'}
+        if ref['disponible']:
+            factor = factor_unidades(ref['unidad'], s['unidad_medida'])
+            if factor is None:
+                ref.update(disponible=False, minimo=None, maximo=None,
+                           detalle='La unidad del sensor no coincide con la del catalogo.')
+            else:
+                ref.update(minimo=round(ref['minimo'] * factor, 2), maximo=round(ref['maximo'] * factor, 2))
+        reglas = [p for p in parametros if p['idSensor'] == s['idSensore']]
+        propias = [p for p in reglas if p['nombre'] in nombres_gestionados(tipo)]
+        otras = [p['nombre'] for p in reglas if p['activo'] and p not in propias]
+        items.append(dict(ref, idSensor=s['idSensore'], tipo=tipo, unidad=s['unidad_medida'],
+                          activo_actual=any(p['activo'] for p in propias), otras_alertas=otras))
+    for tipo, variable in VARIABLE_SENSOR.items():
+        if not any(i['tipo'] == tipo for i in items):
+            ref = rango_referencia(filas, cultivo, etapa, variable)
+            items.append(dict(ref, idSensor=None, tipo=tipo, disponible=False,
+                              detalle='Sensor no registrado en este dispositivo.', activo_actual=False, otras_alertas=[]))
+    return {'cultivo': cultivo, 'etapa': etapa, 'sensores': items,
+            'iluminacion': {v: rango_referencia(filas, cultivo, etapa, v) for v in ('fotoperiodo', 'ppfd')}}
+
+
+def aplicar_previa(cursor, previa, activar):
+    resumen = []
+    for item in previa['sensores']:
+        sid, tipo = item['idSensor'], item['tipo']
+        if sid is None or tipo not in NOMBRES_RANGO:
+            continue
+        existentes = [p for p in reglas_sensor(cursor, sid) if p['nombre'] in nombres_gestionados(tipo)]
+        activo = bool(item['disponible'] and (sid in activar if activar is not None else item['activo_actual']))
+        usados = set()
+        if item['disponible']:
+            for condicion, nombre, limite in zip(('menor_que', 'mayor_que'), NOMBRES_RANGO[tipo], (item['minimo'], item['maximo'])):
+                candidatos = [p for p in existentes if p['condicion'] == condicion]
+                previo = next((p for p in candidatos if p['nombre'] == nombre), candidatos[0] if candidatos else None)
+                if previo:
+                    if float(previo['valor_umbral']) != limite or bool(previo['activo']) != activo:
+                        resolver_incidentes(cursor, previo['idParametro'])
+                    cursor.execute("UPDATE parametros_alerta SET nombre=%s, valor_umbral=%s, activo=%s WHERE idParametro=%s",
+                                   (nombre, limite, int(activo), previo['idParametro']))
+                    usados.add(previo['idParametro'])
+                else:
+                    cursor.execute("""INSERT INTO parametros_alerta (idSensor,nombre,condicion,valor_umbral,prioridad,activo)
+                                      VALUES (%s,%s,%s,%s,%s,%s)""",
+                                   (sid, nombre, condicion, limite, 'alta' if tipo in ('ph', 'distancia') else 'media', int(activo)))
+        for previo in existentes:
+            if previo['idParametro'] not in usados:
+                cursor.execute("UPDATE parametros_alerta SET activo=0 WHERE idParametro=%s", (previo['idParametro'],))
+                resolver_incidentes(cursor, previo['idParametro'])
+        resumen.append({'idSensor': sid, 'activo': activo, 'aplicado': item['disponible'], 'detalle': item['detalle']})
+    return resumen
+
+
+def estado_dispositivo(cursor, device_id):
+    cursor.execute("""
+        SELECT s.idSensore AS idSensor, s.tipo_sensor, s.unidad_medida, r.valor, r.fecha_hora
+        FROM sensores s LEFT JOIN registro_sensores r ON r.idRegistro_sensor=(
+            SELECT rr.idRegistro_sensor FROM registro_sensores rr WHERE rr.idSensor=s.idSensore
+            ORDER BY rr.fecha_hora DESC, rr.idRegistro_sensor DESC LIMIT 1)
+        WHERE s.idDispositivo=%s ORDER BY s.idSensore
+    """, (device_id,))
+    datos = cursor.fetchall()
+    for dato in datos:
+        dato.update(evaluar_lectura(dato['valor'], dato['fecha_hora'], reglas_sensor(cursor, dato['idSensor'])))
+    return datos
+
+
+@app.route('/api/rangos/dispositivo/<int:device_id>')
+@login_requerido
+def obtener_rangos_dispositivo(device_id):
+    try:
+        uid = get_id_usuario()
+        with sesion_rangos() as (_, cursor):
+            permiso = permiso_rangos(cursor, device_id, uid)
+            if not permiso:
+                return jsonify(error='Dispositivo no encontrado o sin permiso.'), 403
+            return jsonify(perfil=leer_perfil(cursor, device_id), puede_editar=bool(permiso['puede_editar']),
+                           sensores=estado_dispositivo(cursor, device_id))
+    except Exception:
+        app.logger.exception('Error consultando rangos')
+        return jsonify(error='No se pudieron consultar los rangos. Revisa la conexion con MySQL.'), 500
+
+
+@app.route('/api/rangos/previa/<int:device_id>')
+@login_requerido
+def obtener_previa_rangos(device_id):
+    try:
+        cultivo, etapa = request.args.get('cultivo'), request.args.get('etapa')
+        validar_perfil(cultivo, etapa)
+        uid = get_id_usuario()
+        with sesion_rangos() as (_, cursor):
+            if not permiso_rangos(cursor, device_id, uid):
+                return jsonify(error='Dispositivo no encontrado o sin permiso.'), 403
+            return jsonify(construir_previa(cursor, device_id, cultivo, etapa))
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    except Exception:
+        app.logger.exception('Error preparando rangos')
+        return jsonify(error='No se pudo leer el catalogo de rangos.'), 500
+
+
+@app.route('/api/rangos/aplicar/<int:device_id>', methods=['POST'])
+@login_requerido
+def guardar_perfil_rangos(device_id):
+    try:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            raise ValueError('Envia un objeto JSON.')
+        cultivo, etapa = data.get('cultivo'), data.get('etapa')
+        validar_perfil(cultivo, etapa)
+        activar = data.get('activar_sensores')
+        if activar is not None and (not isinstance(activar, list) or any(type(x) is not int or x <= 0 for x in activar)):
+            raise ValueError('activar_sensores debe ser una lista de IDs de sensores.')
+        uid = get_id_usuario()
+        with sesion_rangos() as (conexion, cursor):
+            permiso = permiso_rangos(cursor, device_id, uid)
+            if not permiso or not permiso['puede_editar']:
+                return jsonify(error='Necesitas permiso de control sobre este dispositivo.'), 403
+            asegurar_tabla_perfil(cursor)
+            cursor.execute('SELECT idDispositivo FROM dispositivos WHERE idDispositivo=%s FOR UPDATE', (device_id,))
+            cursor.fetchone()
+            cursor.execute('SELECT idSensore FROM sensores WHERE idDispositivo=%s ORDER BY idSensore FOR UPDATE', (device_id,))
+            cursor.fetchall()
+            previa = construir_previa(cursor, device_id, cultivo, etapa)
+            disponibles = {x['idSensor'] for x in previa['sensores'] if x['idSensor'] is not None and x['disponible']}
+            if activar is not None and not set(activar).issubset(disponibles):
+                raise ValueError('Solo puedes activar sensores de este dispositivo con limites y unidades validos.')
+            resumen = aplicar_previa(cursor, previa, set(activar) if activar is not None else None)
+            cursor.execute("""
+                INSERT INTO perfil_rangos_dispositivo (idDispositivo,cultivo,etapa) VALUES (%s,%s,%s)
+                ON DUPLICATE KEY UPDATE cultivo=%s, etapa=%s, actualizado_en=NOW()
+            """, (device_id, cultivo, etapa, cultivo, etapa))
+            conexion.commit()
+            return jsonify(status='success', perfil={'cultivo': cultivo, 'etapa': etapa}, sensores=resumen)
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    except Exception:
+        app.logger.exception('Error guardando perfil de rangos')
+        return jsonify(error='No se guardaron los rangos. Revisa MySQL y los permisos para crear la tabla de perfil.'), 500
+
+
+@app.route('/api/rangos/simular/<int:id_sensor>', methods=['POST'])
+@login_requerido
+def simular_rangos(id_sensor):
+    # Solo calcula; no inserta lecturas, alertas ni ordenes para actuadores.
+    try:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            raise ValueError('Envia un objeto JSON.')
+        cultivo, etapa = data.get('cultivo'), data.get('etapa')
+        validar_perfil(cultivo, etapa)
+        valores = data.get('valores')
+        if not isinstance(valores, list) or not 1 <= len(valores) <= 30:
+            raise ValueError('Envia entre 1 y 30 valores numericos.')
+        if any(type(v) not in (int, float) or not math.isfinite(v) for v in valores):
+            raise ValueError('Todos los valores deben ser numeros finitos.')
+        uid = get_id_usuario()
+        with sesion_rangos() as (_, cursor):
+            cursor.execute('SELECT idDispositivo FROM sensores WHERE idSensore=%s', (id_sensor,))
+            sensor = cursor.fetchone()
+            if not sensor or not permiso_rangos(cursor, sensor['idDispositivo'], uid):
+                return jsonify(error='Sensor no encontrado o sin permiso.'), 403
+            previa = construir_previa(cursor, sensor['idDispositivo'], cultivo, etapa)
+            item = next(x for x in previa['sensores'] if x['idSensor'] == id_sensor)
+            if not item['disponible']:
+                raise ValueError(item['detalle'])
+            reglas = [{'idParametro': 0, 'activo': 1, 'condicion': cond, 'valor_umbral': limite}
+                      for cond, limite in (('menor_que', item['minimo']), ('mayor_que', item['maximo']))]
+            return jsonify(simulacion=True, unidad=item['unidad'],
+                           resultados=[dict(evaluar_reglas(v, reglas), valor=v) for v in valores])
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    except Exception:
+        app.logger.exception('Error simulando rangos')
+        return jsonify(error='No se pudo realizar la simulacion.'), 500
+
+
+PAGINA_RANGOS = r'''<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rangos · Hydrosense</title>
+<style>
+:root{font-family:system-ui,sans-serif;color:#213b30;background:#f3f7f4;color-scheme:light}
+*{box-sizing:border-box}body{margin:0}main{max-width:1200px;margin:auto;padding:28px 20px}
+header{display:flex;align-items:center;justify-content:space-between;gap:20px}
+h1{margin:10px 0;font-size:1.8rem}h2{font-size:1.1rem;margin-top:0}a{color:#166347}
+p{line-height:1.55}section{background:white;border:1px solid #d9e5dd;border-radius:12px;padding:22px;margin-top:20px}
+.selectores{display:flex;flex-wrap:wrap;gap:18px}label{display:grid;gap:7px;flex:1;min-width:190px;font-weight:600}
+select,button{font:inherit;padding:10px 12px;border-radius:7px;border:1px solid #a9bfb0}
+select{width:100%;background:white;color:#213b30}button{cursor:pointer;background:#176448;color:white;font-weight:600}
+button:disabled{cursor:default;opacity:.45}button.secundario{background:white;color:#176448}
+.acciones{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-top:20px}
+.nota,small{color:#526d5e;font-size:.9rem}small{display:block;margin-top:5px;max-width:300px}
+.tabla{overflow:auto}table{width:100%;border-collapse:collapse;margin-top:12px;font-size:.94rem}
+th,td{text-align:left;padding:12px 10px;border-bottom:1px solid #e5ece7;vertical-align:top}
+th{font-size:.8rem;text-transform:uppercase;letter-spacing:.025em;white-space:nowrap}
+td.numero{white-space:nowrap}input[type=checkbox]{width:20px;height:20px;accent-color:#176448}
+.estado{display:inline-block;padding:4px 8px;border-radius:5px;background:#edf2ef;white-space:nowrap}
+.estado.en_rango{background:#e3f4e7;color:#18502c}.estado.bajo,.estado.alto,.estado.alerta,.estado.rango_inconsistente{background:#fff0db;color:#7c4700}
+#mensaje{min-height:1.5em;margin-bottom:0}#mensaje.error{color:#a22626}#mensaje.exito{color:#176448}
+#perfilActual{margin-bottom:0}#prueba{white-space:pre-line}footer{margin-top:20px}
+@media(max-width:600px){main{padding:18px 12px}section{padding:16px}header{align-items:flex-start}h1{font-size:1.5rem}}
+</style>
+</head>
+<body><main>
+<header><div><span class="nota">HYDROSENSE</span><h1>Rangos y alertas</h1></div><a href="/dashboard">Volver al panel</a></header>
+<p>Elige el cultivo y la etapa para aplicar sus límites al dispositivo. Activa las alertas cuando hayas verificado las lecturas de cada sensor.</p>
+<section aria-label="Selección del perfil">
+<div class="selectores">
+<label>Dispositivo<select id="dispositivo"><option value="">Cargando…</option></select></label>
+<label>Cultivo<select id="cultivo" disabled><option value="">Selecciona…</option><option value="cilantro">Cilantro</option><option value="perejil">Perejil</option><option value="compartido">Cilantro y perejil — depósito compartido</option></select></label>
+<label>Etapa<select id="etapa" disabled><option value="">Selecciona…</option><option value="general">General</option><option value="inicial">Inicial</option><option value="desarrollo">Desarrollo</option><option value="media">Media</option><option value="final">Final</option></select></label>
+</div>
+<p class="nota">La EC del cilantro necesita una etapa. En depósito compartido se usa esa etapa del cilantro y el intervalo general del perejil.</p>
+<p id="perfilActual" class="nota"></p>
+<p id="mensaje" role="status" aria-live="polite"></p>
+</section>
+<section>
+<h2>Límites que se aplicarán</h2>
+<p class="nota">“Estado actual” usa las alertas guardadas. “Probar” evalúa los límites seleccionados con valores de ejemplo.</p>
+<div class="tabla"><table>
+<thead><tr><th>Sensor</th><th>Mínimo</th><th>Máximo</th><th>Unidad</th><th>Última lectura</th><th>Estado actual</th><th>Activar alertas</th><th>Prueba</th></tr></thead>
+<tbody id="filas"><tr><td colspan="8">Selecciona un dispositivo, un cultivo y una etapa.</td></tr></tbody>
+</table></div>
+<div class="acciones"><button id="guardar" disabled>Guardar rangos y alertas</button><span class="nota" id="permiso"></span></div>
+<p class="nota">Temperatura del aire y humedad: límites provisionales de prueba. Temperatura del agua: guía hidropónica general. La sonda de pH requiere calibración; luz y distancia requieren límites medidos en tu instalación.</p>
+</section>
+<section><h2>Iluminación</h2><p id="iluminacion">Selecciona un perfil para ver sus referencias.</p><p class="nota">El LDR actual entrega un índice relativo. Fotoperiodo y PPFD requieren mediciones específicas.</p></section>
+<section id="panelPrueba" hidden><h2>Resultado de la simulación</h2><p id="prueba" role="status"></p></section>
+<footer class="nota">Las lecturas se actualizan cada 10 segundos. Una lectura con más de 5 minutos se muestra como antigua.</footer>
+</main>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const estadoTexto = {en_rango:'En rango',bajo:'Bajo',alto:'Alto',alerta:'Alerta',sin_datos:'Sin datos',sin_datos_recientes:'Sin datos recientes',sin_alertas_activas:'Alertas inactivas',lectura_invalida:'Lectura inválida',rango_inconsistente:'Revisar límites'};
+const sensorTexto = {temperatura:'DHT22 · temperatura',humedad:'DHT22 · humedad',ph:'Sonda de pH',luz:'LDR',distancia:'HC-SR04',ec:'Conductividad eléctrica',temperatura_agua:'DS18B20 · agua'};
+const formato = valor => valor === null || valor === undefined ? 'Pendiente' : Number(valor).toLocaleString('es-MX',{maximumFractionDigits:2});
+let dispositivo = '', revision = 0, puedeEditar = false, guardando = false, consultando = false, previa = null;
+let lecturas = new Map(), celdas = new Map(), casillas = new Map();
+function mensaje(texto, tipo='') { $('mensaje').textContent = texto; $('mensaje').className = tipo; }
+async function api(url, opciones={}) {
+  const respuesta = await fetch(url,{credentials:'same-origin',...opciones});
+  if (respuesta.status === 401) { window.location.assign('/'); throw new Error('Inicia sesión.'); }
+  const dato = await respuesta.json();
+  if (!respuesta.ok) throw new Error(dato.error || dato.mensaje || 'No se pudo completar la solicitud.');
+  return dato;
+}
+function bloqueo() {
+  $('guardar').disabled = guardando || !puedeEditar || !previa;
+  $('dispositivo').disabled = guardando;
+  $('cultivo').disabled = guardando || !dispositivo;
+  $('etapa').disabled = guardando || !dispositivo;
+  for (const {casilla, disponible} of casillas.values()) casilla.disabled = guardando || !puedeEditar || !disponible;
+}
+function limpiar() {
+  previa = null; celdas.clear(); casillas.clear(); $('filas').replaceChildren();
+  const fila = $('filas').insertRow(), celda = fila.insertCell(); celda.colSpan = 8;
+  celda.textContent = 'Selecciona un dispositivo, un cultivo y una etapa.';
+  $('iluminacion').textContent = 'Selecciona un perfil para ver sus referencias.';
+  $('panelPrueba').hidden = true; bloqueo();
+}
+function mostrarLecturas() {
+  for (const [id, {lectura, estado}] of celdas) {
+    const dato = lecturas.get(id); lectura.replaceChildren();
+    lectura.textContent = dato && dato.valor !== null ? formato(dato.valor) : 'Sin datos';
+    if (dato && dato.fecha_hora) { const fecha = document.createElement('small'); fecha.textContent = dato.fecha_hora; lectura.append(fecha); }
+    const nombre = dato ? dato.estado_rango : 'sin_datos';
+    estado.textContent = estadoTexto[nombre] || nombre; estado.className = 'estado ' + nombre;
+  }
+}
+function mostrarPrevia(dato) {
+  previa = dato; $('filas').replaceChildren(); celdas.clear(); casillas.clear();
+  for (const item of dato.sensores) {
+    const fila = $('filas').insertRow(), sensor = fila.insertCell();
+    sensor.textContent = sensorTexto[item.tipo] || item.tipo;
+    const nota = document.createElement('small');
+    nota.textContent = (item.idSensor === null ? 'Sin sensor registrado.' : 'ID ' + item.idSensor) + (item.detalle ? ' · ' + item.detalle : '');
+    sensor.append(nota);
+    if (item.otras_alertas.length) { const otras = document.createElement('small'); otras.textContent = 'Otras alertas activas: ' + item.otras_alertas.join(', '); sensor.append(otras); }
+    for (const valor of [item.minimo,item.maximo]) { const celda = fila.insertCell(); celda.className = 'numero'; celda.textContent = formato(valor); }
+    fila.insertCell().textContent = item.unidad || '—';
+    const lectura = fila.insertCell(), estado = document.createElement('span'); fila.insertCell().append(estado);
+    const activar = fila.insertCell(), prueba = fila.insertCell();
+    if (item.idSensor !== null) {
+      celdas.set(item.idSensor,{lectura,estado});
+      const casilla = document.createElement('input'); casilla.type = 'checkbox';
+      casilla.checked = item.disponible && item.activo_actual;
+      casilla.setAttribute('aria-label','Activar alertas de ' + (sensorTexto[item.tipo] || item.tipo) + ', ID ' + item.idSensor);
+      activar.append(casilla); casillas.set(item.idSensor,{casilla,disponible:item.disponible});
+      const boton = document.createElement('button'); boton.textContent = 'Probar'; boton.className = 'secundario'; boton.disabled = !item.disponible;
+      boton.addEventListener('click',()=>simular(item,boton)); prueba.append(boton);
+    } else { lectura.textContent = 'Sin datos'; estado.textContent = 'Sin sensor'; estado.className = 'estado'; activar.textContent = '—'; prueba.textContent = '—'; }
+  }
+  const texto = [];
+  for (const [variable, nombre] of [['fotoperiodo','Fotoperiodo'],['ppfd','PPFD']]) {
+    const r = dato.iluminacion[variable];
+    texto.push(nombre + ': ' + (r.disponible ? formato(r.minimo) + (r.minimo === r.maximo ? '' : '–' + formato(r.maximo)) + ' ' + r.unidad : 'sin límites para este perfil'));
+  }
+  $('iluminacion').textContent = texto.join(' · '); mostrarLecturas(); bloqueo();
+}
+async function cargarPrevia() {
+  const turno = ++revision; limpiar(); mensaje('');
+  if (!dispositivo || !$('cultivo').value || !$('etapa').value) return;
+  mensaje('Consultando límites…');
+  try {
+    const consulta = new URLSearchParams({cultivo:$('cultivo').value,etapa:$('etapa').value});
+    const dato = await api('/api/rangos/previa/' + dispositivo + '?' + consulta);
+    if (turno !== revision) return;
+    mostrarPrevia(dato); mensaje('Revisa los límites y las casillas antes de guardar.');
+  } catch (error) { if (turno === revision) mensaje(error.message,'error'); }
+}
+function recibirEstado(dato) {
+  puedeEditar = dato.puede_editar; lecturas = new Map(dato.sensores.map(s=>[s.idSensor,s]));
+  $('permiso').textContent = puedeEditar ? 'Puedes modificar este dispositivo.' : 'Acceso de consulta.';
+  $('perfilActual').textContent = dato.perfil ? 'Perfil guardado: ' + dato.perfil.cultivo + ' · ' + dato.perfil.etapa : 'Todavía no hay un perfil guardado.';
+  mostrarLecturas(); bloqueo();
+}
+async function cambiarDispositivo() {
+  const turno = ++revision; dispositivo = $('dispositivo').value; puedeEditar = false; lecturas.clear();
+  $('cultivo').value = ''; $('etapa').value = ''; $('perfilActual').textContent = ''; $('permiso').textContent = ''; limpiar(); mensaje('');
+  if (!dispositivo) return;
+  try {
+    const dato = await api('/api/rangos/dispositivo/' + dispositivo);
+    if (turno !== revision) return;
+    recibirEstado(dato);
+    if (dato.perfil) { $('cultivo').value = dato.perfil.cultivo; $('etapa').value = dato.perfil.etapa; await cargarPrevia(); }
+  } catch (error) { if (turno === revision) mensaje(error.message,'error'); }
+}
+async function refrescar() {
+  if (!dispositivo || guardando || consultando || document.hidden) return;
+  const seleccionado = dispositivo; consultando = true;
+  try { const dato = await api('/api/rangos/dispositivo/' + seleccionado); if (seleccionado === dispositivo && !guardando) recibirEstado(dato); }
+  catch (error) { if (seleccionado === dispositivo) mensaje(error.message,'error'); }
+  finally { consultando = false; }
+}
+async function guardar() {
+  if (!previa || !puedeEditar || guardando) return;
+  const seleccion = {cultivo:previa.cultivo,etapa:previa.etapa,activar_sensores:[...casillas].filter(([,v])=>v.casilla.checked && v.disponible).map(([id])=>id)};
+  guardando = true; bloqueo(); mensaje('Guardando…');
+  try {
+    await api('/api/rangos/aplicar/' + dispositivo,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(seleccion)});
+    recibirEstado(await api('/api/rangos/dispositivo/' + dispositivo));
+    await cargarPrevia(); mensaje('Rangos y alertas guardados. Se evaluarán con las próximas lecturas.','exito');
+  } catch (error) { mensaje(error.message,'error'); }
+  finally { guardando = false; bloqueo(); }
+}
+async function simular(item, boton) {
+  if (!previa) return;
+  const turno = revision, perfil = {cultivo:previa.cultivo,etapa:previa.etapa};
+  const paso = Math.max(.01,(item.maximo-item.minimo)/10);
+  const valores = [item.minimo-paso,(item.minimo+item.maximo)/2,item.maximo+paso].map(v=>Number(v.toFixed(2)));
+  boton.disabled = true;
+  try {
+    const dato = await api('/api/rangos/simular/' + item.idSensor,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...perfil,valores})});
+    if (turno !== revision) return;
+    $('panelPrueba').hidden = false;
+    $('prueba').textContent = (sensorTexto[item.tipo] || item.tipo) + '\n' + dato.resultados.map(r=>formato(r.valor) + ' ' + dato.unidad + ' → ' + estadoTexto[r.estado_rango]).join('\n') + '\nValores de ejemplo; el historial conserva las lecturas reales.';
+  } catch (error) { if (turno === revision) mensaje(error.message,'error'); }
+  finally { boton.disabled = !item.disponible; }
+}
+async function iniciar() {
+  try {
+    const lista = await api('/api/dispositivos/lista'); $('dispositivo').replaceChildren(new Option('Selecciona…',''));
+    for (const d of lista) $('dispositivo').add(new Option(d.nombre + ' · ID ' + d.idDispositivo,String(d.idDispositivo)));
+    if (!lista.length) mensaje('Tu cuenta no tiene dispositivos disponibles.');
+    if (lista.length === 1) { $('dispositivo').value = String(lista[0].idDispositivo); await cambiarDispositivo(); }
+  } catch (error) { mensaje(error.message,'error'); }
+}
+$('dispositivo').addEventListener('change',cambiarDispositivo);
+$('cultivo').addEventListener('change',cargarPrevia);
+$('etapa').addEventListener('change',cargarPrevia);
+$('guardar').addEventListener('click',guardar);
+iniciar(); setInterval(refrescar,10000);
+</script></body></html>'''
+
+
+@app.route('/rangos')
+@login_requerido
+def pagina_rangos():
+    return render_template_string(PAGINA_RANGOS)
 
 
 if __name__ == '__main__':

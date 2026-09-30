@@ -1,3 +1,4 @@
+// HYDROSENSE - HISTORIAL DE ALERTAS INTEGRADO - 29/09/2026
 function toast(mensaje, tipo = 'info', duracion = 3500) {
     let contenedor = document.getElementById('toast-contenedor');
     if (!contenedor) {
@@ -1179,18 +1180,7 @@ async function cargarAlertasSeccion() {
 }
 
 async function cargarSensoresEnFiltro() {
-    const select = document.getElementById('filtro-sensor-historial');
-    if (!select) return;
-    try {
-        const sensores = await (await fetch('/api/sensores/lista')).json();
-        select.innerHTML = '<option value="">Todos los sensores</option>';
-        sensores.forEach(s => {
-            let o = document.createElement('option');
-            o.value = s.idSensore;
-            o.textContent = `${s.tipo_sensor} (ID:${s.idSensore})`;
-            select.appendChild(o);
-        });
-    } catch (e) { console.error("Error cargando sensores filtro:", e); }
+    return historialHydrosense.cargarSensores();
 }
 
 async function cargarSensoresEnSelectParametro() {
@@ -1209,117 +1199,23 @@ async function cargarSensoresEnSelectParametro() {
 }
 
 function aplicarFiltros() {
-    cargarHistorialAlertas();
+    return historialHydrosense.filtrar();
 }
 
 async function cargarHistorialAlertas() {
-    const contenedor = document.getElementById('tabla-historial-alertas');
-    contenedor.innerHTML = '<p style="color:#888;">Cargando historial...</p>';
-
-    const prioridad = document.getElementById('filtro-prioridad')?.value || '';
-    const estado    = document.getElementById('filtro-estado')?.value    || '';
-    const idSensor  = document.getElementById('filtro-sensor-historial')?.value || '';
-
-    let qs = new URLSearchParams();
-    if (prioridad) qs.append('prioridad', prioridad);
-    if (estado)    qs.append('estado', estado);
-    if (idSensor)  qs.append('idSensor', idSensor);
-
-    try {
-        const alertas = await (await fetch('/api/alertas/historial?' + qs.toString())).json();
-
-        if (alertas.length === 0) {
-            contenedor.innerHTML = '<p style="color:#888; padding:16px;">No hay alertas con esos criterios.</p>';
-            return;
-        }
-
-        let html = `<table>
-            <thead><tr>
-                <th>ID</th><th>Sensor</th><th>Parámetro</th>
-                <th>Valor</th><th>Umbral</th><th>Prioridad</th>
-                <th>Estado</th><th>Fecha</th><th>Acciones</th>
-            </tr></thead><tbody>`;
-
-        alertas.forEach(a => {
-            html += `<tr class="prioridad-${a.prioridad}">
-                <td>${a.idHistorial}</td>
-                <td>${a.tipo_sensor} <small style="color:#888;">${a.unidad_medida || ''}</small></td>
-                <td>${a.nombre_parametro}</td>
-                <td><strong>${a.valor_detectado}</strong></td>
-                <td>${labelCondicion(a.condicion)} ${a.valor_umbral}</td>
-                <td>${badgePrioridad(a.prioridad)}</td>
-                <td>${badgeEstado(a.estado)}</td>
-                <td style="white-space:nowrap;">${a.fecha_hora}</td>
-                <td style="white-space:nowrap;">
-                    <button class="btn-sm" onclick="verDetalleAlerta(${a.idHistorial})">👁 Ver</button>
-                    ${a.estado === 'nueva'
-                        ? `<button class="btn-naranja btn-sm" onclick="cambiarEstadoAlerta(${a.idHistorial},'vista')">✓ Vista</button>`
-                        : ''}
-                    ${a.estado !== 'resuelta'
-                        ? `<button class="btn-verde btn-sm" onclick="cambiarEstadoAlerta(${a.idHistorial},'resuelta')">✔ Resolver</button>`
-                        : ''}
-                </td>
-            </tr>`;
-        });
-
-        html += '</tbody></table>';
-        contenedor.innerHTML = html;
-    } catch (e) {
-        contenedor.innerHTML = '<p style="color:red;">Error al cargar el historial.</p>';
-        console.error(e);
-    }
+    return historialHydrosense.cargar();
 }
 
-let _alertaDetalleId = null;
-
 async function verDetalleAlerta(idHistorial) {
-    _alertaDetalleId = idHistorial;
-    try {
-        const alertas = await (await fetch('/api/alertas/historial?limite=500')).json();
-        const a = alertas.find(x => x.idHistorial === idHistorial);
-        if (!a) return toast("No se encontró la alerta", "error");
-
-        document.getElementById('contenido-detalle-alerta').innerHTML = `
-            <p><strong>Sensor:</strong> ${a.tipo_sensor} (${a.unidad_medida || '—'})</p>
-            <p><strong>Parámetro:</strong> ${a.nombre_parametro}</p>
-            <p><strong>Condición:</strong> valor ${labelCondicion(a.condicion)} ${a.valor_umbral} ${a.unidad_medida || ''}</p>
-            <p><strong>Valor detectado:</strong> ${a.valor_detectado} ${a.unidad_medida || ''}</p>
-            <p><strong>Prioridad:</strong> ${badgePrioridad(a.prioridad)}</p>
-            <p><strong>Estado:</strong> ${badgeEstado(a.estado)}</p>
-            <p><strong>Fecha / Hora:</strong> ${a.fecha_hora}</p>
-            ${a.fecha_resolucion ? `<p><strong>Resuelta el:</strong> ${a.fecha_resolucion}</p>` : ''}
-            ${a.mensaje ? `<p><strong>Mensaje:</strong> ${a.mensaje}</p>` : ''}
-        `;
-
-        const btnVista    = document.getElementById('btn-marcar-vista');
-        const btnResuelta = document.getElementById('btn-marcar-resuelta');
-
-        btnVista.style.display    = a.estado === 'nueva'    ? 'inline-block' : 'none';
-        btnResuelta.style.display = a.estado !== 'resuelta' ? 'inline-block' : 'none';
-
-        btnVista.onclick    = () => cambiarEstadoAlerta(idHistorial, 'vista',    true);
-        btnResuelta.onclick = () => cambiarEstadoAlerta(idHistorial, 'resuelta', true);
-
-        document.getElementById('modal-detalle-alerta').classList.add('activo');
-    } catch (e) { console.error("Error detalle alerta:", e); }
+    return historialHydrosense.detalle(idHistorial);
 }
 
 async function cambiarEstadoAlerta(idHistorial, nuevoEstado, desdeModal = false) {
-    try {
-        const res = await fetch(`/api/alertas/historial/estado/${idHistorial}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ estado: nuevoEstado })
-        });
-        if (res.ok) {
-            if (desdeModal) cerrarModal('modal-detalle-alerta');
-            await cargarHistorialAlertas();
-            await actualizarBadgeNav();
-        }
-    } catch (e) { toast("Error al actualizar el estado", "error"); }
+    return historialHydrosense.cambiarEstado(idHistorial, nuevoEstado, desdeModal);
 }
 
 async function cargarParametrosAlerta() {
+    rangosHydrosense.abrir();
     const contenedor = document.getElementById('tabla-parametros-alerta');
     contenedor.innerHTML = '<p style="color:#888;">Cargando...</p>';
     try {
@@ -1327,7 +1223,7 @@ async function cargarParametrosAlerta() {
 
         if (params.length === 0) {
             contenedor.innerHTML = `<div class="card" style="text-align:center; padding:30px; color:#888;">
-                No hay parámetros configurados aún.<br>
+                Todavía no hay reglas guardadas. Puedes generarlas con los rangos de arriba o crear un parámetro manual.<br>
                 <button class="btn-verde" style="margin-top:12px;" onclick="abrirModal('modal-parametro')">+ Crear el primero</button>
             </div>`;
             return;
@@ -1403,6 +1299,7 @@ async function guardarParametro() {
             cerrarModal('modal-parametro');
             limpiarFormParametro();
             cargarParametrosAlerta();
+            rangosHydrosense.actualizar();
         } else {
             const err = await res.json();
             toast("Error: " + (err.error || "Intenta de nuevo"), "error");
@@ -1434,7 +1331,7 @@ async function eliminarParametro(idParam) {
     if (!await confirmar("¿Eliminar este parámetro? Se borrará también su historial de alertas.")) return;
     try {
         const res = await fetch(`/api/alertas/parametros/eliminar/${idParam}`, { method: 'DELETE' });
-        if (res.ok) { toast("Parámetro eliminado", "success"); cargarParametrosAlerta(); }
+        if (res.ok) { toast("Parámetro eliminado", "success"); cargarParametrosAlerta(); rangosHydrosense.actualizar(); }
         else toast("Error al eliminar", "error");
     } catch (e) { toast("Error de conexión con el servidor", "error"); }
 }
@@ -2261,3 +2158,575 @@ async function enviarRedWifi() {
     }
 }
 
+
+
+// Rangos del cultivo dentro de Alertas > Parametros / Umbrales.
+// Usa las API del app.py HYDROSENSE - RANGOS INTEGRADOS - 29/09/2026.
+const rangosHydrosense = (() => {
+'use strict';
+let montado = false, inicio = null;
+const $ = id => document.getElementById('hs-' + id);
+const estadoTexto = {en_rango:'En rango',bajo:'Bajo',alto:'Alto',alerta:'Alerta',sin_datos:'Sin datos',sin_datos_recientes:'Sin datos recientes',sin_alertas_activas:'Alertas inactivas',lectura_invalida:'Lectura inválida',rango_inconsistente:'Revisar límites'};
+const sensorTexto = {temperatura:'DHT22 · temperatura',humedad:'DHT22 · humedad',ph:'Sonda de pH',luz:'LDR',distancia:'HC-SR04',ec:'Conductividad eléctrica',temperatura_agua:'DS18B20 · agua'};
+const formato = valor => valor === null || valor === undefined ? 'Pendiente' : Number(valor).toLocaleString('es-MX',{maximumFractionDigits:2});
+let dispositivo = '', revision = 0, puedeEditar = false, guardando = false, consultando = false, previa = null;
+let lecturas = new Map(), celdas = new Map(), casillas = new Map();
+function mensaje(texto, tipo='') { $('mensaje').textContent = texto; $('mensaje').className = tipo; }
+async function api(url, opciones={}) {
+  const respuesta = await fetch(url,{credentials:'same-origin',...opciones});
+  if (respuesta.status === 401) { window.location.assign('/'); throw new Error('Inicia sesión.'); }
+  const dato = await respuesta.json();
+  if (!respuesta.ok) throw new Error(dato.error || dato.mensaje || 'No se pudo completar la solicitud.');
+  return dato;
+}
+function bloqueo() {
+  $('guardar').disabled = guardando || !puedeEditar || !previa;
+  $('actualizar').disabled = guardando;
+  $('dispositivo').disabled = guardando;
+  $('cultivo').disabled = guardando || !dispositivo;
+  $('etapa').disabled = guardando || !dispositivo;
+  for (const {casilla, disponible} of casillas.values()) casilla.disabled = guardando || !puedeEditar || !disponible;
+}
+function limpiar() {
+  previa = null; celdas.clear(); casillas.clear(); $('filas').replaceChildren();
+  const fila = $('filas').insertRow(), celda = fila.insertCell(); celda.colSpan = 8;
+  celda.textContent = 'Selecciona un dispositivo, un cultivo y una etapa.';
+  $('iluminacion').textContent = 'Selecciona un perfil para ver sus referencias.';
+  $('panelPrueba').hidden = true; bloqueo();
+}
+function mostrarLecturas() {
+  for (const [id, {lectura, estado}] of celdas) {
+    const dato = lecturas.get(id); lectura.replaceChildren();
+    lectura.textContent = dato && dato.valor !== null ? formato(dato.valor) : 'Sin datos';
+    if (dato && dato.fecha_hora) { const fecha = document.createElement('small'); fecha.textContent = dato.fecha_hora; lectura.append(fecha); }
+    const nombre = dato ? dato.estado_rango : 'sin_datos';
+    estado.textContent = estadoTexto[nombre] || nombre; estado.className = 'estado ' + nombre;
+  }
+}
+function mostrarPrevia(dato) {
+  previa = dato; $('filas').replaceChildren(); celdas.clear(); casillas.clear();
+  for (const item of dato.sensores) {
+    const fila = $('filas').insertRow(), sensor = fila.insertCell();
+    sensor.textContent = sensorTexto[item.tipo] || item.tipo;
+    const nota = document.createElement('small');
+    nota.textContent = (item.idSensor === null ? 'Sin sensor registrado.' : 'ID ' + item.idSensor) + (item.detalle ? ' · ' + item.detalle : '');
+    sensor.append(nota);
+    if (item.otras_alertas.length) { const otras = document.createElement('small'); otras.textContent = 'Otras alertas activas: ' + item.otras_alertas.join(', '); sensor.append(otras); }
+    for (const valor of [item.minimo,item.maximo]) { const celda = fila.insertCell(); celda.className = 'numero'; celda.textContent = formato(valor); }
+    fila.insertCell().textContent = item.tipo === 'luz' ? 'índice LDR' : (item.unidad || '—');
+    const lectura = fila.insertCell(), estado = document.createElement('span'); fila.insertCell().append(estado);
+    const activar = fila.insertCell(), prueba = fila.insertCell();
+    if (item.idSensor !== null) {
+      celdas.set(item.idSensor,{lectura,estado});
+      const casilla = document.createElement('input'); casilla.type = 'checkbox';
+      casilla.checked = item.disponible && item.activo_actual;
+      casilla.setAttribute('aria-label','Activar alertas de ' + (sensorTexto[item.tipo] || item.tipo) + ', ID ' + item.idSensor);
+      activar.append(casilla); casillas.set(item.idSensor,{casilla,disponible:item.disponible});
+      const boton = document.createElement('button'); boton.type = 'button'; boton.textContent = 'Probar'; boton.className = 'secundario'; boton.disabled = !item.disponible;
+      boton.addEventListener('click',()=>simular(item,boton)); prueba.append(boton);
+    } else { lectura.textContent = 'Sin datos'; estado.textContent = 'Sin sensor'; estado.className = 'estado'; activar.textContent = '—'; prueba.textContent = '—'; }
+  }
+  const texto = [];
+  for (const [variable, nombre] of [['fotoperiodo','Fotoperiodo'],['ppfd','PPFD']]) {
+    const r = dato.iluminacion[variable];
+    texto.push(nombre + ': ' + (r.disponible ? formato(r.minimo) + (r.minimo === r.maximo ? '' : '–' + formato(r.maximo)) + ' ' + r.unidad : 'sin límites para este perfil'));
+  }
+  $('iluminacion').textContent = texto.join(' · '); mostrarLecturas(); bloqueo();
+}
+async function cargarPrevia() {
+  const turno = ++revision; limpiar(); mensaje('');
+  if (!dispositivo || !$('cultivo').value || !$('etapa').value) return;
+  mensaje('Consultando límites…');
+  try {
+    const consulta = new URLSearchParams({cultivo:$('cultivo').value,etapa:$('etapa').value});
+    const dato = await api('/api/rangos/previa/' + dispositivo + '?' + consulta);
+    if (turno !== revision) return;
+    mostrarPrevia(dato); mensaje('Revisa los límites y las casillas. Al guardar, se crearán o actualizarán las reglas de la lista inferior.');
+    return true;
+  } catch (error) { if (turno === revision) mensaje(error.message,'error'); return false; }
+}
+function recibirEstado(dato) {
+  puedeEditar = dato.puede_editar; lecturas = new Map(dato.sensores.map(s=>[s.idSensor,s]));
+  $('permiso').textContent = puedeEditar ? 'Puedes modificar este dispositivo.' : 'Acceso de consulta.';
+  $('perfilActual').textContent = dato.perfil ? 'Perfil guardado: ' + dato.perfil.cultivo + ' · ' + dato.perfil.etapa : 'Todavía no hay un perfil guardado.';
+  mostrarLecturas(); bloqueo();
+}
+async function cambiarDispositivo() {
+  const turno = ++revision; dispositivo = $('dispositivo').value; puedeEditar = false; lecturas.clear();
+  $('cultivo').value = ''; $('etapa').value = ''; $('perfilActual').textContent = ''; $('permiso').textContent = ''; limpiar(); mensaje('');
+  if (!dispositivo) return;
+  try {
+    const dato = await api('/api/rangos/dispositivo/' + dispositivo);
+    if (turno !== revision) return;
+    recibirEstado(dato);
+    if (dato.perfil) { $('cultivo').value = dato.perfil.cultivo; $('etapa').value = dato.perfil.etapa; await cargarPrevia(); }
+  } catch (error) { if (turno === revision) mensaje(error.message,'error'); }
+}
+async function refrescar() {
+  if (!dispositivo || guardando || consultando || document.hidden) return;
+  const tab = document.getElementById('tab-parametros');
+  const seccion = document.getElementById('seccion-alertas');
+  if (!tab?.classList.contains('activo') || !seccion || getComputedStyle(seccion).display === 'none') return;
+  const seleccionado = dispositivo; consultando = true;
+  try { const dato = await api('/api/rangos/dispositivo/' + seleccionado); if (seleccionado === dispositivo && !guardando) recibirEstado(dato); }
+  catch (error) { if (seleccionado === dispositivo) mensaje(error.message,'error'); }
+  finally { consultando = false; }
+}
+async function guardar() {
+  if (!previa || !puedeEditar || guardando) return;
+  const seleccion = {cultivo:previa.cultivo,etapa:previa.etapa,activar_sensores:[...casillas].filter(([,v])=>v.casilla.checked && v.disponible).map(([id])=>id)};
+  guardando = true; bloqueo(); mensaje('Guardando…');
+  let aplicado = false;
+  try {
+    await api('/api/rangos/aplicar/' + dispositivo,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(seleccion)});
+    aplicado = true;
+    recibirEstado(await api('/api/rangos/dispositivo/' + dispositivo));
+    await cargarParametrosAlerta();
+    await actualizarBadgeNav();
+    if (await cargarPrevia()) mensaje('Rangos guardados. Las próximas lecturas se evaluarán con estos límites.','exito');
+    else mensaje('Los rangos se guardaron, pero no se pudo actualizar la vista. Recarga la página.','error');
+  } catch (error) { mensaje((aplicado ? 'Los rangos se guardaron, pero no se pudo actualizar la vista: ' : '') + error.message,'error'); }
+  finally { guardando = false; bloqueo(); }
+}
+async function simular(item, boton) {
+  if (!previa) return;
+  const turno = revision, perfil = {cultivo:previa.cultivo,etapa:previa.etapa};
+  const paso = Math.max(.01,(item.maximo-item.minimo)/10);
+  const valores = [item.minimo-paso,(item.minimo+item.maximo)/2,item.maximo+paso].map(v=>Number(v.toFixed(2)));
+  boton.disabled = true;
+  try {
+    const dato = await api('/api/rangos/simular/' + item.idSensor,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...perfil,valores})});
+    if (turno !== revision) return;
+    $('panelPrueba').hidden = false;
+    $('prueba').textContent = (sensorTexto[item.tipo] || item.tipo) + '\n' + dato.resultados.map(r=>formato(r.valor) + ' ' + dato.unidad + ' → ' + estadoTexto[r.estado_rango]).join('\n') + '\nValores de ejemplo; el historial conserva las lecturas reales.';
+  } catch (error) { if (turno === revision) mensaje(error.message,'error'); }
+  finally { boton.disabled = !item.disponible; }
+}
+async function iniciar() {
+  try {
+    const lista = await api('/api/dispositivos/lista'); $('dispositivo').replaceChildren(new Option('Selecciona…',''));
+    for (const d of lista) $('dispositivo').add(new Option(d.nombre + ' · ID ' + d.idDispositivo,String(d.idDispositivo)));
+    if (!lista.length) mensaje('Tu cuenta no tiene dispositivos disponibles.');
+    if (lista.length === 1) { $('dispositivo').value = String(lista[0].idDispositivo); await cambiarDispositivo(); }
+  } catch (error) { mensaje(error.message,'error'); }
+}
+
+function abrir() {
+  if (montado) return inicio;
+  const destino = document.getElementById('tabla-parametros-alerta');
+  if (!destino) return Promise.resolve();
+  const estilo = document.createElement('style');
+  estilo.id = 'hs-rangos-estilo';
+  estilo.textContent = `
+#hs-rangos-panel{margin:0 0 22px;min-width:0}
+#hs-rangos-panel h3{margin:0 0 10px;color:#1a3d2b;font-size:18px}
+#hs-rangos-panel p{line-height:1.5}
+#hs-rangos-panel .hs-nota,#hs-rangos-panel small{color:#526d5e;font-size:13px}
+#hs-rangos-panel small{display:block;margin-top:4px;max-width:260px}
+#hs-rangos-panel .hs-selectores{display:grid;grid-template-columns:1fr 1.6fr 1fr;gap:14px;margin:18px 0 12px}
+#hs-rangos-panel label{margin:0;font-weight:600;font-size:14px;min-width:0}
+#hs-rangos-panel select{display:block;width:100%;margin:7px 0 0;padding:10px;border:1px solid #bcd4c6;border-radius:8px;background:white;box-sizing:border-box}
+#hs-rangos-panel .hs-tabla{overflow-x:auto;margin-top:16px}
+#hs-rangos-panel table{margin:0;width:100%;font-size:13px}
+#hs-rangos-panel th,#hs-rangos-panel td{padding:11px 9px;vertical-align:top}
+#hs-rangos-panel th{font-size:12px}
+#hs-rangos-panel .numero{white-space:nowrap}
+#hs-rangos-panel input[type=checkbox]{width:19px;height:19px;margin:2px;accent-color:#2d6a4f;cursor:pointer}
+#hs-rangos-panel button{font-family:inherit}
+#hs-rangos-panel .secundario{padding:6px 10px;border:1px solid #bcd4c6;border-radius:7px;background:white;color:#245c40;cursor:pointer}
+#hs-rangos-panel button:disabled,#hs-rangos-panel input:disabled{opacity:.45;cursor:default}
+#hs-rangos-panel .hs-acciones{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:18px 0 12px}
+#hs-rangos-panel .estado{display:inline-block;padding:4px 7px;border-radius:5px;background:#edf2ef;white-space:nowrap;font-size:12px}
+#hs-rangos-panel .estado.en_rango{background:#e3f4e7;color:#18502c}
+#hs-rangos-panel .estado.bajo,#hs-rangos-panel .estado.alto,#hs-rangos-panel .estado.alerta,#hs-rangos-panel .estado.rango_inconsistente{background:#fff0db;color:#7c4700}
+#hs-rangos-panel #hs-mensaje{font-size:14px;min-height:21px;color:#355d46}
+#hs-rangos-panel #hs-mensaje.error{color:#b02a2a}
+#hs-rangos-panel #hs-mensaje.exito{color:#176448;font-weight:600}
+#hs-rangos-panel .hs-detalles{font-size:13px;color:#526d5e;padding:12px 0;border-top:1px solid #e1ebe4}
+#hs-rangos-panel summary{cursor:pointer;font-weight:600}
+#hs-rangos-panel #hs-panelPrueba{padding:12px 16px;background:#f0f7f2;border-radius:8px;margin-top:12px}
+#hs-rangos-panel #hs-prueba{white-space:pre-line;font-size:14px}
+#hs-rangos-panel .hs-pie{margin-bottom:0}
+@media(max-width:760px){#hs-rangos-panel .hs-selectores{grid-template-columns:1fr}#hs-rangos-panel{padding:18px}}
+`;
+  document.head.append(estilo);
+  const panel = document.createElement('section');
+  panel.id = 'hs-rangos-panel'; panel.className = 'card';
+  panel.setAttribute('aria-label','Rangos por cultivo y etapa');
+  panel.innerHTML = `
+<h3>Rangos por cultivo y etapa</h3>
+<p class="hs-nota">Selecciona un perfil para preparar los límites de tus sensores. Las casillas indican qué alertas activarás al guardar.</p>
+<div class="hs-selectores">
+<label for="hs-dispositivo">Dispositivo<select id="hs-dispositivo"><option value="">Cargando…</option></select></label>
+<label for="hs-cultivo">Cultivo<select id="hs-cultivo" disabled><option value="">Selecciona…</option><option value="cilantro">Cilantro</option><option value="perejil">Perejil</option><option value="compartido">Cilantro y perejil — depósito compartido</option></select></label>
+<label for="hs-etapa">Etapa<select id="hs-etapa" disabled><option value="">Selecciona…</option><option value="general">General</option><option value="inicial">Inicial</option><option value="desarrollo">Desarrollo</option><option value="media">Media</option><option value="final">Final</option></select></label>
+</div>
+<p class="hs-nota">La EC del cilantro necesita una etapa. En depósito compartido se toma esa etapa del cilantro y el intervalo general del perejil.</p>
+<p id="hs-perfilActual" class="hs-nota"></p>
+<p id="hs-mensaje" role="status" aria-live="polite"></p>
+<div class="hs-tabla"><table>
+<thead><tr><th>Sensor</th><th>Mínimo</th><th>Máximo</th><th>Unidad</th><th>Última lectura</th><th>Estado actual</th><th>Activar al guardar</th><th>Prueba</th></tr></thead>
+<tbody id="hs-filas"><tr><td colspan="8">Selecciona un dispositivo, un cultivo y una etapa.</td></tr></tbody>
+</table></div>
+<div class="hs-acciones"><button type="button" id="hs-guardar" class="btn-verde" disabled>Guardar rangos y alertas</button><button type="button" id="hs-actualizar" class="btn-sm">Actualizar lecturas</button><span id="hs-permiso" class="hs-nota"></span></div>
+<p class="hs-nota">El estado actual corresponde a las reglas guardadas. “Probar” usa valores de ejemplo. Cada rango genera dos reglas: una para valores bajos y otra para valores altos.</p>
+<details class="hs-detalles"><summary>Referencias y límites pendientes</summary>
+<p id="hs-iluminacion">Selecciona un perfil para ver las referencias de iluminación.</p>
+<p>Temperatura del aire y humedad: límites provisionales de prueba. Temperatura del agua: guía hidropónica general. Activa las alertas del pH después de calibrar la sonda.</p>
+<p>El LDR entrega un índice relativo; no mide PPFD. Los límites de luz y de distancia al agua requieren mediciones en tu instalación.</p>
+</details>
+<div id="hs-panelPrueba" hidden><h4>Resultado de la simulación</h4><p id="hs-prueba" role="status"></p></div>
+<p class="hs-nota hs-pie">Las lecturas se actualizan cada 10 segundos mientras esta pestaña está abierta.</p>
+`;
+  destino.before(panel);
+  const titulo = document.createElement('h3');
+  titulo.id = 'hs-reglas-guardadas'; titulo.textContent = 'Reglas guardadas';
+  destino.before(titulo);
+  montado = true;
+$('dispositivo').addEventListener('change',cambiarDispositivo);
+$('cultivo').addEventListener('change',cargarPrevia);
+$('etapa').addEventListener('change',cargarPrevia);
+$('guardar').addEventListener('click',guardar);
+
+  $('actualizar').addEventListener('click', async () => {
+    if (!dispositivo) { await iniciar(); return; }
+    await refrescar();
+  });
+  inicio = iniciar();
+  setInterval(refrescar,10000);
+  return inicio;
+}
+return {abrir, actualizar: refrescar};
+})();
+
+// Historial: consulta los registros existentes y mantiene los ejemplos solo en memoria.
+const historialHydrosense = (() => {
+    const $ = id => document.getElementById(id);
+    const filtros = ['filtro-prioridad', 'filtro-estado', 'filtro-sensor-historial'];
+    const nombres = {temperatura:'DHT22 · temperatura', humedad:'DHT22 · humedad', ph:'Sonda de pH', luz:'LDR', distancia:'HC-SR04', ec:'Conductividad eléctrica', temperatura_agua:'DS18B20 · agua'};
+    const prioridades = {critica:'Crítica', alta:'Alta', media:'Media', baja:'Baja'};
+    const estados = {nueva:'Nueva', vista:'Vista', resuelta:'Resuelta'};
+    let montado = false, ejemplo = false, limite = 200, revision = 0;
+    let consultando = false, mutando = false;
+    let registros = new Map(), sensores = [], ejemplos = [], ultimaConsulta = '';
+    let detalleActual = null, claveMostrada = null, sensoresPendientes = null;
+    const numero = valor => valor === null || valor === undefined || valor === '' || !Number.isFinite(Number(valor))
+        ? '—' : Number(valor).toLocaleString('es-MX', {maximumFractionDigits:2});
+    const unidad = a => a.tipo_sensor === 'luz' ? 'índice LDR' : (a.unidad_medida || '');
+    const crear = (tag, texto, clase) => {
+        const nodo = document.createElement(tag);
+        if (texto !== undefined) nodo.textContent = texto;
+        if (clase) nodo.className = clase;
+        return nodo;
+    };
+    function fecha(valor) {
+        if (!valor) return '—';
+        const m = String(valor).match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2}:\d{2})/);
+        return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}` : String(valor);
+    }
+    function boton(texto, accion, clase = 'btn-sm') {
+        const b = crear('button', texto, clase); b.type = 'button';
+        b.addEventListener('click', accion); return b;
+    }
+    function seleccion() { return filtros.map(id => $(id)?.value || ''); }
+    function firma() { return JSON.stringify([ejemplo, ...seleccion()]); }
+    function criterio() {
+        return filtros.filter(id => $(id)?.value).map(id => $(id).selectedOptions[0]?.textContent || $(id).value).join(' · ');
+    }
+    function mensaje(texto, error = false) {
+        $('hh-mensaje').textContent = texto;
+        $('hh-mensaje').className = error ? 'hh-error' : 'hh-nota';
+        $('hh-mensaje').setAttribute('role', error ? 'alert' : 'status');
+    }
+    async function pedir(url, options = {}) {
+        const controlador = new AbortController();
+        const temporizador = setTimeout(() => controlador.abort(), 12000);
+        try {
+            const respuesta = await fetch(url, {...options, signal:controlador.signal, cache:'no-store'});
+            if (respuesta.status === 401 || respuesta.redirected) throw new Error('Tu sesión terminó. Inicia sesión nuevamente.');
+            if (respuesta.status === 403) throw new Error('Tu cuenta no tiene permiso para realizar esta acción.');
+            if (!respuesta.ok) throw new Error('El servidor no pudo completar la solicitud. Revisa Flask y la conexión con MySQL.');
+            try { return await respuesta.json(); }
+            catch (_) { throw new Error('La respuesta del servidor no es válida. Recarga la página e inicia sesión si es necesario.'); }
+        } catch (error) {
+            if (error.name === 'AbortError') throw new Error('El servidor tardó demasiado en responder. Comprueba que Flask siga encendido.');
+            if (error instanceof TypeError) throw new Error('No se pudo conectar con el servidor. Comprueba que Flask siga encendido y abre la dirección actual del sistema.');
+            throw error;
+        } finally { clearTimeout(temporizador); }
+    }
+    function condicionRegistrada(a) {
+        // El umbral del parámetro puede cambiar. Solo se muestra como histórico
+        // el que quedó escrito en el mensaje del evento, no el umbral actual.
+        const m = String(a.mensaje || '').match(/^Sensor\s+\d+:\s+valor\s+([-+\d.eE]+)\s+(mayor que|menor que|igual a)\s+umbral\s+([-+\d.eE]+)\s*$/);
+        if (!m || !Number.isFinite(Number(m[1])) || !Number.isFinite(Number(m[3])) || Number(m[1]) !== Number(a.valor_detectado)) return null;
+        return `${{'mayor que':'>','menor que':'<','igual a':'='}[m[2]]} ${numero(m[3])} ${unidad(a)}`.trim();
+    }
+    function insignia(tipo, valor) {
+        const mapa = tipo === 'estado' ? estados : prioridades;
+        const nodo = crear('span', mapa[valor] || 'Sin especificar', 'hh-badge');
+        if (Object.hasOwn(mapa, valor)) nodo.classList.add('hh-' + valor);
+        return nodo;
+    }
+    function resumen(lista, hayMas) {
+        const contenedor = $('hh-resumen'); contenedor.replaceChildren();
+        for (const [titulo, valor] of [
+            ['Mostradas',lista.length], ['Nuevas',lista.filter(a => a.estado === 'nueva').length],
+            ['Vistas',lista.filter(a => a.estado === 'vista').length], ['Resueltas',lista.filter(a => a.estado === 'resuelta').length]
+        ]) {
+            const tarjeta = crear('div', undefined, 'hh-contador');
+            tarjeta.append(crear('strong', String(valor)), crear('span', titulo)); contenedor.append(tarjeta);
+        }
+        $('hh-alcance').textContent = (ejemplo ? 'Vista de ejemplo. ' : 'Registros guardados. ') +
+            (criterio() ? 'Filtros: ' + criterio() + '. ' : 'Todas las prioridades, estados y sensores. ') +
+            (hayMas ? `Se muestran las ${lista.length} alertas más recientes que coinciden. Usa “Mostrar más” para consultar anteriores.` : `${lista.length} alerta(s) encontradas.`);
+    }
+    function actualizarModo() {
+        $('hh-demo').hidden = !ejemplo;
+        $('hh-ejemplo').textContent = ejemplo ? 'Volver al historial real' : 'Ver ejemplo';
+        $('hh-ejemplo').setAttribute('aria-pressed', String(ejemplo));
+        $('tabla-historial-alertas').classList.toggle('hh-ejemplo', ejemplo);
+    }
+    function abrirParametros() {
+        const b = document.querySelector('#seccion-alertas [onclick*="tab-parametros"]');
+        if (b) b.click();
+    }
+    function dibujar(lista, hayMas = false) {
+        registros = new Map(lista.map(a => [String(a.idHistorial), a]));
+        claveMostrada = firma(); actualizarModo(); resumen(lista, hayMas);
+        const destino = $('tabla-historial-alertas'); destino.replaceChildren();
+        if (!lista.length) {
+            const vacio = crear('div', undefined, 'hh-vacio');
+            vacio.append(crear('strong', criterio() ? 'No hay alertas con estos filtros.' : ejemplo ? 'No hay ejemplos para mostrar.' : 'Todavía no hay alertas registradas.'));
+            vacio.append(crear('p', criterio()
+                ? 'Prueba con todas las prioridades, estados y sensores para consultar el historial completo.'
+                : 'Las próximas lecturas que cumplan una regla activa generarán una alerta. Configurar rangos o simular umbrales no crea alertas reales.'));
+            vacio.append(boton(criterio() ? 'Quitar filtros' : 'Configurar umbrales', criterio() ? quitarFiltros : abrirParametros));
+            destino.append(vacio); return;
+        }
+        const envoltura = crear('div', undefined, 'hh-tabla');
+        const tabla = crear('table'); tabla.setAttribute('aria-label', ejemplo ? 'Ejemplo de historial de alertas, datos simulados' : 'Historial de alertas registradas');
+        const cabecera = tabla.createTHead().insertRow();
+        for (const titulo of ['Fecha y hora', 'Sensor', 'Valor registrado', 'Condición registrada', 'Prioridad', 'Estado', 'Acciones']) {
+            const th = crear('th', titulo); th.scope = 'col'; cabecera.append(th);
+        }
+        const cuerpo = tabla.createTBody();
+        for (const a of lista) {
+            const fila = cuerpo.insertRow(); fila.dataset.alerta = String(a.idHistorial);
+            if (Object.hasOwn(prioridades,a.prioridad)) fila.classList.add('prioridad-' + a.prioridad);
+            const f = fila.insertCell(); f.append(crear('span',fecha(a.fecha_hora)),crear('small',ejemplo ? 'Ejemplo · ' + a.idHistorial : 'Registro #' + a.idHistorial));
+            fila.insertCell().textContent = nombres[a.tipo_sensor] || a.tipo_sensor || 'Sensor';
+            fila.insertCell().append(crear('strong',numero(a.valor_detectado) + ' ' + unidad(a)));
+            const condicion = fila.insertCell(); condicion.textContent = condicionRegistrada(a) || 'Consultar mensaje';
+            condicion.title = 'Condición conservada en el mensaje original de la alerta.';
+            fila.insertCell().append(insignia('prioridad',a.prioridad));
+            fila.insertCell().append(insignia('estado',a.estado));
+            const acciones = fila.insertCell(); acciones.className = 'hh-acciones';
+            acciones.append(boton('Ver detalle',() => detalle(a.idHistorial)));
+            if (!ejemplo && a.estado === 'nueva') {
+                const vista = boton('Marcar vista',() => cambiarEstado(a.idHistorial,'vista'),'btn-sm btn-naranja');
+                vista.dataset.hhCambio = '1'; vista.disabled = mutando; acciones.append(vista);
+            }
+        }
+        envoltura.append(tabla); destino.append(envoltura);
+        if (hayMas && !ejemplo) {
+            const mas = boton('Mostrar más',() => { if (!consultando) { limite += 200; cargar({mas:true}); } });
+            mas.id = 'hh-mas'; destino.append(mas);
+        }
+    }
+    function montar() {
+        if (montado) return true;
+        const destino = $('tabla-historial-alertas'); if (!destino) return false;
+        const estilo = crear('style'); estilo.textContent = `
+#tab-historial .hh-cabecera{padding:18px 20px;background:#fff;border:1px solid #cfe2d7;border-radius:12px;margin-bottom:16px}
+#tab-historial .hh-cabecera h3{margin:0 0 8px;color:#1a3d2b;font-size:18px}
+#tab-historial .hh-nota,#tab-historial .hh-cabecera p{font-size:14px;line-height:1.5;color:#52675b;margin:8px 0}
+#tab-historial .hh-barra{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+#tab-historial .hh-error{padding:12px 14px;color:#963623;background:#fff2ed;border-radius:8px}
+#tab-historial #hh-demo{padding:14px;background:#fff2ca;color:#674c10;border:1px solid #e3c46d;border-radius:9px;margin:12px 0;font-weight:600;line-height:1.5}
+#tab-historial #hh-resumen{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:16px 0 10px}
+#tab-historial .hh-contador{padding:14px 16px;border:1px solid #cfe2d7;border-radius:10px;background:#fff}
+#tab-historial .hh-contador strong{display:block;font-size:25px;color:#1a3d2b}
+#tab-historial .hh-contador span{display:block;color:#607165;font-size:13px;margin-top:4px}
+#tab-historial .hh-vacio{padding:28px;background:#fff;border:1px solid #cfe2d7;border-radius:12px;line-height:1.6}
+#tab-historial .hh-vacio p{color:#627368;max-width:740px}
+#tab-historial .hh-tabla{overflow-x:auto;border:1px solid #cfe2d7;border-radius:10px;background:#fff}
+#tab-historial .hh-tabla table{width:100%;margin:0;border-collapse:collapse;min-width:850px}
+#tab-historial .hh-tabla th,#tab-historial .hh-tabla td{padding:13px 12px;text-align:left;vertical-align:top}
+#tab-historial .hh-tabla th{background:#1a3d2b;color:#fff}
+#tab-historial .hh-tabla td{border-bottom:1px solid #edf2ee;font-size:14px}
+#tab-historial .hh-tabla small{display:block;color:#6b7c70;margin-top:5px}
+#tab-historial .hh-tabla .hh-acciones button{display:block;margin:0 0 7px;white-space:nowrap}
+.hh-badge{display:inline-block;padding:4px 8px;border-radius:6px;background:#edf2ee;color:#334e3e;font-size:12px;white-space:nowrap}
+.hh-badge.hh-nueva,.hh-badge.hh-critica{background:#fde6e4;color:#982d25}
+.hh-badge.hh-vista,.hh-badge.hh-media{background:#fff0c5;color:#705315}
+.hh-badge.hh-resuelta,.hh-badge.hh-baja{background:#e2f2e8;color:#256044}
+.hh-badge.hh-alta{background:#ffebd8;color:#8b491d}
+#tab-historial #hh-mas{margin-top:14px}
+#tab-historial .hh-ejemplo .hh-tabla{border:2px solid #d7b45c}
+#tab-historial button:disabled{opacity:.6;cursor:wait}
+@media(max-width:600px){#tab-historial #hh-resumen{grid-template-columns:repeat(2,minmax(0,1fr))}}
+`;
+        document.head.append(estilo);
+        const encabezado = crear('section',undefined,'hh-cabecera'); encabezado.id = 'hh-intro';
+        encabezado.append(crear('h3','Seguimiento de alertas'),crear('p','Consulta qué lectura disparó cada alerta y cuándo se registró. El estado “Vista” indica que alguien la revisó; “Resuelta” indica que el registro se cerró.'));
+        const barra = crear('div',undefined,'hh-barra');
+        const demo = boton('Ver ejemplo',alternarEjemplo); demo.id = 'hh-ejemplo';
+        const limpiar = boton('Quitar filtros',quitarFiltros); limpiar.id = 'hh-limpiar';
+        barra.append(demo,limpiar); encabezado.append(barra);
+        $('tab-historial').prepend(encabezado);
+        const aviso = crear('div','VISTA DE EJEMPLO · Datos simulados para revisar la pantalla. No son mediciones del Arduino y no se guardan.'); aviso.id = 'hh-demo'; aviso.hidden = true;
+        const contadores = crear('div'); contadores.id = 'hh-resumen';
+        const alcance = crear('p',undefined,'hh-nota'); alcance.id = 'hh-alcance';
+        const estado = crear('p',undefined,'hh-nota'); estado.id = 'hh-mensaje'; estado.setAttribute('role','status'); estado.setAttribute('aria-live','polite');
+        destino.before(aviso,contadores,alcance,estado);
+        const nota = crear('p','Se actualiza cada 15 segundos mientras este apartado está visible. Los estados corresponden al historial; revisa las últimas lecturas en Parámetros / Umbrales.', 'hh-nota');
+        destino.after(nota);
+        filtros.forEach((id,i) => $(id)?.setAttribute('aria-label',['Filtrar por prioridad','Filtrar por estado','Filtrar por sensor'][i]));
+        montado = true;
+        setInterval(() => {
+            if (!ejemplo && !consultando && !mutando && visible()) return cargar({silencioso:true});
+        },15000);
+        return true;
+    }
+    function visible() {
+        const seccion = $('seccion-alertas'), tab = $('tab-historial');
+        return seccion && tab && !document.hidden && seccion.style.display !== 'none' &&
+            getComputedStyle(seccion).display !== 'none' && tab.classList.contains('activo');
+    }
+    async function cargar({silencioso = false, mas = false} = {}) {
+        if (!montar()) return false;
+        const turno = ++revision, clave = firma();
+        const [prioridad,estado,idSensor] = seleccion();
+        if (clave !== claveMostrada && !mas) limite = 200;
+        if (ejemplo) {
+            consultando = false;
+            $('tabla-historial-alertas').setAttribute('aria-busy','false');
+            const lista = ejemplos.filter(a => (!prioridad || a.prioridad === prioridad) && (!estado || a.estado === estado) && (!idSensor || String(a.idSensor) === idSensor));
+            dibujar(lista); mensaje('Ejemplo local: puedes revisar los filtros y el detalle sin conectar el prototipo.'); return true;
+        }
+        consultando = true; $('tabla-historial-alertas').setAttribute('aria-busy','true');
+        if (!silencioso) mensaje('Consultando historial…');
+        if (clave !== claveMostrada) {
+            registros.clear(); $('tabla-historial-alertas').replaceChildren(); $('hh-resumen').replaceChildren(); $('hh-alcance').textContent = '';
+        }
+        actualizarModo();
+        const qs = new URLSearchParams({limite:String(limite + 1)});
+        if (prioridad) qs.set('prioridad',prioridad);
+        if (estado) qs.set('estado',estado);
+        if (idSensor) qs.set('idSensor',idSensor);
+        try {
+            const datos = await pedir('/api/alertas/historial?' + qs);
+            if (turno !== revision) return false;
+            if (!Array.isArray(datos)) throw new Error('El servidor devolvió un historial no válido.');
+            dibujar(datos.slice(0,limite),datos.length > limite);
+            ultimaConsulta = new Date().toLocaleTimeString('es-MX');
+            mensaje('Última consulta al servidor: ' + ultimaConsulta + '.'); return true;
+        } catch (error) {
+            if (turno !== revision) return false;
+            mensaje(error.message + (claveMostrada === clave && ultimaConsulta ? ' Se conserva la consulta anterior de las ' + ultimaConsulta + '.' : ''),true);
+            return false;
+        } finally {
+            if (turno === revision) { consultando = false; $('tabla-historial-alertas').setAttribute('aria-busy','false'); }
+        }
+    }
+    function filtrar() { limite = 200; return cargar(); }
+    function quitarFiltros() { filtros.forEach(id => { if ($(id)) $(id).value = ''; }); return filtrar(); }
+    async function cargarSensores() {
+        if (sensoresPendientes) return sensoresPendientes;
+        const select = $('filtro-sensor-historial'); if (!select) return;
+        sensoresPendientes = (async () => {
+            try {
+                const datos = await pedir('/api/sensores/lista');
+                if (!Array.isArray(datos)) throw new Error('Lista de sensores no válida.');
+                sensores = datos;
+                const anterior = select.value;
+                select.replaceChildren(new Option('Todos los sensores',''));
+                for (const s of sensores) select.add(new Option(`${nombres[s.tipo_sensor] || s.tipo_sensor} · ID ${s.idSensore}${s.nombre_dispositivo ? ' · ' + s.nombre_dispositivo : ''}`,String(s.idSensore)));
+                if ([...select.options].some(o => o.value === anterior)) select.value = anterior;
+                else if (anterior) await filtrar();
+                select.title = '';
+            } catch (_) { select.title = 'No se pudo actualizar la lista de sensores. Las opciones anteriores se conservan.'; }
+            finally { sensoresPendientes = null; }
+        })();
+        return sensoresPendientes;
+    }
+    function crearEjemplos() {
+        const ahora = Date.now(), instante = minutos => {
+            const d = new Date(ahora - minutos * 60000), pad = n => String(n).padStart(2,'0');
+            return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+        };
+        const datos = [
+            {tipo_sensor:'temperatura',unidad_medida:'°C',valor_detectado:31.5,condicion:'mayor_que',valor_umbral:30,estado:'nueva',nombre_parametro:'Ejemplo: temperatura alta'},
+            {tipo_sensor:'humedad',unidad_medida:'%',valor_detectado:38,condicion:'menor_que',valor_umbral:40,estado:'vista',nombre_parametro:'Ejemplo: humedad baja'},
+            {tipo_sensor:'temperatura',unidad_medida:'°C',valor_detectado:9,condicion:'menor_que',valor_umbral:10,estado:'resuelta',nombre_parametro:'Ejemplo: temperatura baja'}
+        ];
+        return datos.map((a,i) => {
+            const idSensor = sensores.find(s => s.tipo_sensor === a.tipo_sensor)?.idSensore || 0;
+            return {...a,idHistorial:'E' + (i+1),idSensor,prioridad:'media',fecha_hora:instante((i+1)*20),fecha_resolucion:a.estado === 'resuelta' ? instante(10) : null,
+                mensaje:`Sensor ${idSensor}: valor ${a.valor_detectado} ${a.condicion.replaceAll('_',' ')} umbral ${a.valor_umbral}`};
+        });
+    }
+    function alternarEjemplo() {
+        if (mutando) return;
+        ejemplo = !ejemplo; limite = 200; detalleActual = null;
+        $('modal-detalle-alerta')?.classList.remove('activo');
+        if (ejemplo) ejemplos = crearEjemplos();
+        return cargar();
+    }
+    function detalle(idHistorial) {
+        if (!montar()) return;
+        const a = registros.get(String(idHistorial));
+        if (!a) { mensaje('La alerta ya no está en esta consulta. Actualiza el historial.',true); return; }
+        detalleActual = a;
+        const cont = $('contenido-detalle-alerta'); cont.replaceChildren();
+        const agregar = (titulo,valor) => { const p = crear('p'); p.append(crear('strong',titulo + ': '),document.createTextNode(valor || '—')); cont.append(p); };
+        if (ejemplo) agregar('Vista de ejemplo','Datos simulados, sin registros nuevos en el sistema.');
+        agregar('Registro',ejemplo ? 'Ejemplo ' + a.idHistorial : '#' + a.idHistorial);
+        agregar('Sensor',nombres[a.tipo_sensor] || a.tipo_sensor);
+        agregar('Valor registrado',numero(a.valor_detectado) + ' ' + unidad(a));
+        agregar('Condición registrada',condicionRegistrada(a) || 'No se puede recuperar del mensaje original.');
+        agregar('Prioridad',prioridades[a.prioridad]); agregar('Estado',estados[a.estado]);
+        agregar('Fecha y hora',fecha(a.fecha_hora));
+        if (a.fecha_resolucion) agregar('Fecha de cierre',fecha(a.fecha_resolucion));
+        agregar('Mensaje guardado',a.mensaje);
+        const actual = crear('details'); actual.append(crear('summary','Consultar la regla actual'));
+        actual.append(crear('p',(a.nombre_parametro || 'Sin nombre') + ' · ' + labelCondicion(a.condicion) + ' ' + numero(a.valor_umbral) + ' ' + unidad(a)));
+        actual.append(crear('p','La regla puede haberse modificado después de esta alerta. El mensaje y el valor registrado conservan la información del evento.'));
+        cont.append(actual);
+        const btnVista = $('btn-marcar-vista'), btnCerrar = $('btn-marcar-resuelta');
+        btnVista.style.display = !ejemplo && a.estado === 'nueva' ? 'inline-block' : 'none';
+        btnCerrar.style.display = !ejemplo && a.estado !== 'resuelta' ? 'inline-block' : 'none';
+        btnVista.disabled = btnCerrar.disabled = mutando;
+        btnVista.textContent = 'Marcar como vista'; btnCerrar.textContent = 'Cerrar registro';
+        btnVista.onclick = () => cambiarEstado(a.idHistorial,'vista',true);
+        btnCerrar.onclick = () => cambiarEstado(a.idHistorial,'resuelta',true);
+        if (!ejemplo && a.estado !== 'resuelta') cont.append(crear('p','Cerrar el registro manualmente no confirma que el sensor haya vuelto al rango. Si otra lectura vuelve a cumplir la regla, se generará una nueva alerta.'));
+        const estadoModal = crear('p'); estadoModal.id = 'hh-mensaje-detalle'; estadoModal.setAttribute('role','status'); cont.append(estadoModal);
+        $('modal-detalle-alerta').classList.add('activo');
+    }
+    async function cambiarEstado(idHistorial, estado, desdeModal = false) {
+        if (!montar() || ejemplo || mutando || !['vista','resuelta'].includes(estado)) return false;
+        const a = registros.get(String(idHistorial)) || (String(detalleActual?.idHistorial) === String(idHistorial) ? detalleActual : null);
+        if (!a || !Number.isInteger(Number(idHistorial)) || Number(idHistorial) <= 0 || a.estado === 'resuelta' || (estado === 'vista' && a.estado !== 'nueva')) return false;
+        mutando = true;
+        const botones = [...document.querySelectorAll('[data-hh-cambio],#btn-marcar-vista,#btn-marcar-resuelta,#hh-ejemplo')];
+        botones.forEach(b => { b.disabled = true; });
+        let guardado = false;
+        try {
+            await pedir('/api/alertas/historial/estado/' + Number(idHistorial),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({estado})});
+            guardado = true; a.estado = estado;
+            if (desdeModal) $('modal-detalle-alerta').classList.remove('activo');
+            const cargado = await cargar();
+            await actualizarBadgeNav();
+            if (cargado) mensaje(estado === 'vista' ? 'Alerta marcada como vista.' : 'Registro cerrado. Consulta las últimas lecturas para comprobar el estado del sensor.');
+            else mensaje('El cambio se guardó, pero no se pudo actualizar el historial. Pulsa Actualizar.',true);
+            return true;
+        } catch (error) {
+            const texto = (guardado ? 'El cambio se guardó. ' : '') + error.message;
+            mensaje(texto,true);
+            if (desdeModal && $('hh-mensaje-detalle')) $('hh-mensaje-detalle').textContent = texto;
+            return false;
+        } finally { mutando = false; botones.forEach(b => { b.disabled = false; }); document.querySelectorAll('[data-hh-cambio]').forEach(b => { b.disabled = false; }); }
+    }
+    return {cargar,cargarSensores,filtrar,detalle,cambiarEstado};
+})();
