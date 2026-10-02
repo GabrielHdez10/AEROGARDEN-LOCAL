@@ -1,30 +1,30 @@
-
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
-#include <WiFiClientSecureBearSSL.h>
+#include <WiFiClient.h>
 
-// ── WiFi ─────────────────────────────────────────────────────
-const char* WIFI_SSID = "investigacion_itsx";
-const char* WIFI_PASS = "itsx-2025";
-// ─────────────────────────────────────────────────────────────
+// AeroGarden: puente ESP8266 para Flask en la computadora.
+// Escribe la contraseña real de linksys_SUIP antes de cargar.
+const char* WIFI_SSID = "linksys_SUIP";
+const char* WIFI_PASS = "e0h6i2e5Suip";
 
-const char* SERVER_HOST = "https://web-production-4a25c.up.railway.app";
+// Esta es la IP de la computadora, no la del ESP8266.
+// Mantén python app.py ejecutándose mientras uses el sistema.
+const char* SERVER_HOST = "http://192.168.2.108:5000";
 
-// Control de reconexión sin bloquear el loop
 unsigned long tUltimoIntento = 0;
 const unsigned long REINTENTO_WIFI_MS = 10000UL;
 
+String procesarComando(String cmd);
+
 void setup() {
-    // Serial del ESP826
+    // Enlace con el Mega: debe coincidir con BAUD_ESP.
     Serial.begin(115200);
     delay(200);
 
-    Serial.println("=== ESP8266 Puente WiFi ===");
-    Serial.print("Conectando a "); Serial.println(WIFI_SSID);
+    Serial.println("=== ESP8266 Puente WiFi LOCAL ===");
+    Serial.print("Conectando a ");
+    Serial.println(WIFI_SSID);
 
-    // Conexión NO bloqueante: el loop ya atiende los PING del Mega
-    // (responde wifi:false) mientras se conecta, y el Mega avanza en
-    // cuanto llega wifi:true. Antes esto bloqueaba hasta 15 s.
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -32,7 +32,7 @@ void setup() {
 }
 
 void loop() {
-    // Reconectar WiFi si se pierde (sin bloquear: reintenta cada 10 s)
+    // Reintentar la conexión cada 10 segundos.
     if (WiFi.status() != WL_CONNECTED) {
         if (millis() - tUltimoIntento >= REINTENTO_WIFI_MS) {
             WiFi.disconnect();
@@ -40,16 +40,14 @@ void loop() {
             tUltimoIntento = millis();
         }
     }
-    // (No se imprime nada en Serial desde el loop: esa línea es el enlace
-    //  con el Mega y un texto suelto se confundiría con una respuesta.)
 
-    // Leer comando del Mega
+    // Serial es el enlace con el Mega: responder una línea por comando.
+    // Evitar mensajes de depuración adicionales dentro del loop.
     if (Serial.available()) {
         String linea = Serial.readStringUntil('\n');
         linea.trim();
         if (linea.length() == 0) return;
 
-        // Sondeo de arranque: el Mega pregunta si ya hay WiFi
         if (linea == "PING") {
             Serial.println(WiFi.status() == WL_CONNECTED
                            ? "{\"pong\":true,\"wifi\":true}"
@@ -57,22 +55,21 @@ void loop() {
             return;
         }
 
-        String respuesta = procesarComando(linea);
-        Serial.println(respuesta);
+        Serial.println(procesarComando(linea));
     }
 }
 
-// ================================================================
-// Procesar comando recibido del Mega
-// ================================================================
+// Comandos del Mega:
+// GET:/ruta
+// POST:/ruta:{"campo":"valor"}
 String procesarComando(String cmd) {
     if (WiFi.status() != WL_CONNECTED) {
         return "{\"error\":\"sin_wifi\"}";
     }
 
-    String metodo   = "";
+    String metodo = "";
     String endpoint = "";
-    String body     = "";
+    String body = "";
 
     int sep1 = cmd.indexOf(':');
     if (sep1 == -1) return "{\"error\":\"cmd_invalido\"}";
@@ -83,7 +80,7 @@ String procesarComando(String cmd) {
         int sep2 = cmd.indexOf(':', sep1 + 1);
         if (sep2 == -1) return "{\"error\":\"cmd_invalido\"}";
         endpoint = cmd.substring(sep1 + 1, sep2);
-        body     = cmd.substring(sep2 + 1);
+        body = cmd.substring(sep2 + 1);
     } else if (metodo == "GET") {
         endpoint = cmd.substring(sep1 + 1);
     } else {
@@ -92,12 +89,13 @@ String procesarComando(String cmd) {
 
     String url = String(SERVER_HOST) + endpoint;
 
-    // Cliente HTTPS sin verificar certificado (Railway usa certificado válido)
-    std::unique_ptr<BearSSL::WiFiClientSecure> clienteSSL(new BearSSL::WiFiClientSecure);
-    clienteSSL->setInsecure(); // No verifica certificado SSL
-
+    // Flask local utiliza HTTP: cliente sin TLS.
+    WiFiClient cliente;
     HTTPClient http;
-    http.begin(*clienteSSL, url);
+
+    if (!http.begin(cliente, url)) {
+        return "{\"error\":\"http_begin\"}";
+    }
     http.setTimeout(8000);
 
     int httpCode = -1;
