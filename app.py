@@ -2370,7 +2370,7 @@ td.numero{white-space:nowrap}input[type=checkbox]{width:20px;height:20px;accent-
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
-const estadoTexto = {en_rango:'En rango',bajo:'Bajo',alto:'Alto',alerta:'Alerta',sin_datos:'Sin datos',sin_datos_recientes:'Sin datos recientes',sin_alertas_activas:'Alertas inactivas',lectura_invalida:'Lectura inválida',rango_inconsistente:'Revisar límites'};
+const estadoTexto = {sin_calibrar:'Sin calibrar',sin_metadatos:'Calibración no verificada',sin_temperatura:'Sin temperatura válida',sin_sensor:'Sensor sin lectura',iniciando:'Iniciando',senal_baja:'Señal muy baja',fuera_rango:'Fuera del rango TDS',calibrando:'Calibrando',en_rango:'En rango',bajo:'Bajo',alto:'Alto',alerta:'Alerta',sin_datos:'Sin datos',sin_datos_recientes:'Sin datos recientes',sin_alertas_activas:'Alertas inactivas',lectura_invalida:'Lectura inválida',rango_inconsistente:'Revisar límites'};
 const sensorTexto = {temperatura:'DHT22 · temperatura',humedad:'DHT22 · humedad',ph:'Sonda de pH',luz:'LDR',distancia:'HC-SR04',ec:'Conductividad eléctrica',temperatura_agua:'DS18B20 · agua'};
 const formato = valor => valor === null || valor === undefined ? 'Pendiente' : Number(valor).toLocaleString('es-MX',{maximumFractionDigits:2});
 let dispositivo = '', revision = 0, puedeEditar = false, guardando = false, consultando = false, previa = null;
@@ -2518,10 +2518,384 @@ def pagina_rangos():
     return render_template_string(PAGINA_RANGOS)
 
 
-if __name__ == '__main__':
-    app.run(
-        debug=os.environ.get('FLASK_DEBUG', 'False') == 'True',
-        host='0.0.0.0',
-        port=int(os.environ.get('PORT', 5000))
-    )
+# ============================================================
+# SENSORES DE AGUA — 06/10/2026
+# DS18B20 y EC/TDS del módulo TDS Meter V1.0. Protocolo 2.
+# Implementación incluida aquí: no necesita sensores_agua.py.
+# Preparación de BD: python app.py --preparar-agua
+# El alta de sensores es explícita, idempotente y solo del propietario.
+# ============================================================
+TIPOS_AGUA = ('ec', 'temperatura_agua')
+ESTADOS_AGUA = {'ok','sin_calibrar','sin_temperatura','sin_sensor','iniciando',
+           'senal_baja','fuera_rango','calibrando','lectura_invalida','sin_metadatos'}
 
+
+def _agua_unidad(u):
+    s=str(u or '').lower().replace('µ','u').replace('μ','u')
+    return ''.join(c for c in unicodedata.normalize('NFKD',s) if not unicodedata.combining(c)).replace('°','').replace(' ','')
+
+
+def _agua_numero(v):
+    if v is None or isinstance(v,bool): raise ValueError('Lectura no numérica')
+    n=float(v)
+    if not math.isfinite(n): raise ValueError('Lectura no finita')
+    return n
+
+
+def _agua_validar_unidad(tipo,u):
+    if _agua_unidad(u) not in ({'ms/cm','us/cm'} if tipo=='ec' else {'c'}):
+        raise ValueError('EC requiere mS/cm o µS/cm; temperatura del agua requiere °C.')
+
+
+def _agua_preparar(tipo,valor,meta,origen,destino):
+    _agua_validar_unidad(tipo,destino)
+    d=dict(estado='sin_metadatos',calibrado=False,voltaje=None,tds_ppm=None,factor_k=None,temperatura_c=None)
+    if meta is None:
+        # El firmware anterior enviaba el valor en la unidad del registro.
+        # Si declara una unidad de origen, convertirla también sin diagnóstico.
+        if valor is None:
+            return None,d
+        v=_agua_numero(valor)
+        if tipo=='temperatura_agua':
+            if origen is not None:_agua_validar_unidad(tipo,origen)
+            if not -55<=v<=125 or v==85:
+                d['estado']='lectura_invalida';return None,d
+            return round(v,2),d
+        if v<0:
+            d['estado']='lectura_invalida';return None,d
+        if origen is not None:
+            _agua_validar_unidad(tipo,origen)
+            v*=1 if _agua_unidad(origen)==_agua_unidad(destino) else (1000 if _agua_unidad(destino)=='us/cm' else 0.001)
+        return round(v,4),d
+    if not isinstance(meta,dict) or meta.get('estado') not in ESTADOS_AGUA:
+        raise ValueError('Diagnóstico de agua inválido')
+    d['estado']=meta['estado']
+    if tipo=='temperatura_agua':
+        if _agua_unidad(origen)!='c': raise ValueError('Declarar temperatura_agua en °C')
+        if d['estado']!='ok': return None,d
+        v=_agua_numero(valor)
+        if not -55<=v<=125 or v==85:
+            d['estado']='lectura_invalida';return None,d
+        return round(v,2),d
+    if _agua_unidad(origen)!='ms/cm': raise ValueError('El protocolo v2 declara EC en mS/cm')
+    d['calibrado']=meta.get('calibrado') is True
+    for k in ('voltaje','tds_ppm','factor_k','temperatura_c'):
+        if meta.get(k) is not None:
+            d[k]=_agua_numero(meta[k])
+            if abs(d[k])>100000: raise ValueError('Diagnóstico fuera de límites físicos')
+    if d['estado'] not in ('ok','sin_calibrar'): return None,d
+    if not d['calibrado']: d['estado']='sin_calibrar'
+    v=_agua_numero(valor)
+    if d['temperatura_c'] is None or not 0<=d['temperatura_c']<=55:
+        d['estado']='sin_temperatura';return None,d
+    if d['voltaje'] is None or d['factor_k'] is None or not 0.5<=d['factor_k']<=2:
+        d['estado']='lectura_invalida';return None,d
+    if d['voltaje']<=0.03:
+        d['estado']='senal_baja';return None,d
+    if d['voltaje']>=2.3 or not 0<=v<2 or d['tds_ppm'] is None or not 0<=d['tds_ppm']<1000:
+        d['estado']='fuera_rango';return None,d
+    if abs(d['tds_ppm']-v*500)>1: raise ValueError('EC/TDS incompatibles con el factor 0.5')
+    return round(v*(1000 if _agua_unidad(destino)=='us/cm' else 1),4),d
+
+
+def _agua_instalar(n):
+    """Se instala al terminar de definir las rutas existentes de app.py."""
+    app=n['app'];login=n['login_requerido']
+    @contextmanager
+    def bd():
+        cx=n['conectar_bd']();cur=None
+        try:
+            cur=cx.cursor(dictionary=True);yield cx,cur
+        except Exception:
+            cx.rollback();raise
+        finally:
+            if cur is not None:cur.close()
+            cx.close()
+
+    def guardar(id_sensor,v,d):
+        with bd() as (cx,c):
+            c.execute('SELECT idSensore FROM sensores WHERE idSensore=%s FOR UPDATE',(id_sensor,))
+            if not c.fetchone():raise ValueError('Sensor no encontrado')
+            fecha=datetime.now();rid=None
+            if v is not None:
+                c.execute('INSERT INTO registro_sensores (idSensor,valor,fecha_hora) VALUES (%s,%s,%s)',(id_sensor,v,fecha));rid=c.lastrowid
+            c.execute('''INSERT INTO mediciones_agua
+                (idSensor,idRegistro_sensor,estado,calibrado,voltaje,tds_ppm,factor_k,temperatura_c,fecha_hora)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                (id_sensor,rid,d['estado'],int(d['calibrado']),d['voltaje'],d['tds_ppm'],d['factor_k'],d['temperatura_c'],fecha))
+            # Una muestra provisional o fallida no abre ni resuelve incidentes agronómicos.
+            if d['estado']=='ok' and v is not None:
+                c.execute('SELECT idParametro,nombre,condicion,valor_umbral,prioridad FROM parametros_alerta WHERE idSensor=%s AND activo=1',(id_sensor,))
+                for p in c.fetchall():
+                    if n['cumple_condicion'](v,p['condicion'],float(p['valor_umbral'])):
+                        c.execute("SELECT idHistorial FROM historial_alertas WHERE idParametro=%s AND estado IN ('nueva','vista') LIMIT 1",(p['idParametro'],))
+                        if not c.fetchone():
+                            msg=f"Sensor {id_sensor}: valor {v} {p['condicion'].replace('_',' ')} umbral {p['valor_umbral']}"
+                            c.execute("INSERT INTO historial_alertas (idParametro,idSensor,valor_detectado,prioridad,estado,mensaje) VALUES (%s,%s,%s,%s,'nueva',%s)",
+                                      (p['idParametro'],id_sensor,v,p['prioridad'],msg))
+                    else:n['resolver_incidentes'](c,p['idParametro'])
+            cx.commit()
+
+    def ultima(c,sid):
+        try:
+            c.execute('''SELECT m.estado AS estado_medicion,m.calibrado,m.voltaje,m.tds_ppm,m.factor_k,m.temperatura_c,m.fecha_hora,r.valor
+                FROM mediciones_agua m LEFT JOIN registro_sensores r ON r.idRegistro_sensor=m.idRegistro_sensor
+                WHERE m.idSensor=%s ORDER BY m.fecha_hora DESC,m.idMedicion DESC LIMIT 1''',(sid,))
+            return c.fetchone()
+        except mysql.connector.Error as e:
+            if e.errno==1146:return None
+            raise
+
+    def calidad(c,sid,dato):
+        salida=dict(dato)
+        salida.update(n['evaluar_lectura'](dato.get('valor'),dato.get('fecha_hora'),n['reglas_sensor'](c,sid)))
+        salida['estado_medicion']=dato.get('estado_medicion') or 'sin_metadatos'
+        fecha=dato.get('fecha_hora')
+        salida['edad_segundos']=max(0,(datetime.now()-fecha).total_seconds()) if isinstance(fecha,datetime) else None
+        if salida['edad_segundos'] is not None and salida['edad_segundos']>30:
+            salida['estado_rango']='sin_datos_recientes'
+        elif salida['estado_medicion']!='ok':salida['estado_rango']=salida['estado_medicion']
+        return salida
+
+    def sensor_permitido(c,sid):
+        c.execute('SELECT idSensore,idDispositivo,tipo_sensor,unidad_medida FROM sensores WHERE idSensore=%s',(sid,))
+        s=c.fetchone()
+        if not s or not n['permiso_rangos'](c,s['idDispositivo'],n['get_id_usuario']()):return None
+        return s
+
+    def datos_arduino():
+        data=request.get_json(silent=True)
+        if not isinstance(data,dict) or data.get('token')!=n['ARDUINO_TOKEN']:
+            return jsonify(error='No autorizado'),401
+        did=data.get('device_id');sens=data.get('sensores')
+        if isinstance(did,bool) or not isinstance(did,int) or did<=0:return jsonify(error='device_id inválido'),400
+        if not isinstance(sens,dict) or not sens:return jsonify(error='Sin datos de sensores'),400
+        metas=data.get('diagnostico',{});units=data.get('unidades',{})
+        if not isinstance(metas,dict) or not isinstance(units,dict):return jsonify(error='Diagnóstico o unidades inválidos'),400
+        if data.get('protocolo') not in (None,2):
+            return jsonify(error='Versión de protocolo no compatible'),400
+        if 'ec' in sens and 'temperatura_agua' in sens and isinstance(metas.get('ec'),dict):
+            ecmeta=dict(metas['ec'])
+            if ecmeta.get('estado') in ('ok','sin_calibrar'):
+                tmeta=metas.get('temperatura_agua')
+                try:
+                    t=_agua_numero(sens['temperatura_agua'])
+                    tc=_agua_numero(ecmeta.get('temperatura_c'))
+                    valida=isinstance(tmeta,dict) and tmeta.get('estado')=='ok' and 0<=t<=55 and abs(t-tc)<=0.2
+                except (ValueError,TypeError,OverflowError):
+                    valida=False
+                if not valida:
+                    ecmeta['estado']='sin_temperatura'
+                    metas=dict(metas,ec=ecmeta)
+        guardados=[];errores=[]
+        try:
+            with bd() as (_,c):
+                for raw,vraw in sens.items():
+                    tipo=raw.strip().lower()
+                    c.execute('SELECT idSensore,unidad_medida FROM sensores WHERE idDispositivo=%s AND LOWER(TRIM(tipo_sensor))=%s ORDER BY idSensore',(did,tipo))
+                    filas=c.fetchall()
+                    if len(filas)!=1:
+                        errores.append(tipo+(': sensor no registrado' if not filas else ': registros duplicados; revisar Hardware'));continue
+                    s=filas[0]
+                    try:
+                        estado='ok'
+                        if tipo in TIPOS_AGUA:
+                            v,d=_agua_preparar(tipo,vraw,metas.get(tipo),units.get(tipo),s['unidad_medida'])
+                            guardar(s['idSensore'],v,d);estado=d['estado']
+                        else:
+                            if vraw is None:continue
+                            v=n['convertir_valor'](vraw,n['TIPO_CONV_MAP'].get(tipo))
+                            n['guardar_lectura_bd'](s['idSensore'],v)
+                        guardados.append(dict(tipo=tipo,id=s['idSensore'],valor=v,estado=estado))
+                    except mysql.connector.Error as e:
+                        errores.append(tipo+(': ejecutar python app.py --preparar-agua' if e.errno==1146 else ': error al almacenar'))
+                    except (ValueError,TypeError,OverflowError) as e:errores.append(f'{tipo}: {e}')
+            return jsonify(status='parcial' if errores else 'ok',guardados=guardados,errores=errores)
+        except Exception:
+            app.logger.exception('Error recibiendo sensores');return jsonify(error='No se pudieron recibir los datos'),500
+    app.view_functions['arduino_datos']=datos_arduino
+
+    @app.post('/api/dispositivos/<int:device_id>/integrar-sensores-agua')
+    @login
+    def integrar_agua(device_id):
+        try:
+            with bd() as (cx,c):
+                c.execute('SELECT idDispositivo FROM dispositivos WHERE idDispositivo=%s AND idUsuario=%s FOR UPDATE',(device_id,n['get_id_usuario']()))
+                if not c.fetchone():return jsonify(error='Solo el propietario puede registrar estos sensores'),403
+                c.execute('SELECT idMedicion FROM mediciones_agua LIMIT 0');c.fetchall()
+                c.execute('SELECT idSensore,tipo_sensor,unidad_medida FROM sensores WHERE idDispositivo=%s',(device_id,));todos=c.fetchall();out=[]
+                for tipo,u in (('ec','mS/cm'),('temperatura_agua','°C')):
+                    filas=[s for s in todos if s['tipo_sensor'].strip().lower()==tipo]
+                    if len(filas)>1:raise ValueError(f'Hay varios sensores {tipo}; revisar IDs antes de continuar')
+                    if filas:
+                        s=filas[0];_agua_validar_unidad(tipo,s['unidad_medida']);sid=s['idSensore'];accion='existente'
+                    else:
+                        c.execute('INSERT INTO sensores (tipo_sensor,unidad_medida,idDispositivo) VALUES (%s,%s,%s)',(tipo,u,device_id));sid=c.lastrowid;accion='creado'
+                    out.append(dict(tipo=tipo,id=sid,accion=accion))
+                cx.commit();return jsonify(status='success',sensores=out)
+        except ValueError as e:return jsonify(error=str(e)),409
+        except mysql.connector.Error as e:
+            if e.errno==1146:return jsonify(error='Primero ejecuta: python app.py --preparar-agua'),503
+            app.logger.exception('Error al integrar agua');return jsonify(error='No se pudieron registrar los sensores'),500
+
+    original_actual=app.view_functions['datos_actuales']
+    @login
+    def actual(id_sensor):
+        with bd() as (_,c):
+            s=sensor_permitido(c,id_sensor)
+            if not s:return jsonify(error='Sensor no encontrado'),404
+            if s['tipo_sensor'].strip().lower() not in TIPOS_AGUA:return original_actual(id_sensor)
+            dato=ultima(c,id_sensor)
+            if not dato:
+                c.execute('SELECT valor,fecha_hora FROM registro_sensores WHERE idSensor=%s ORDER BY fecha_hora DESC,idRegistro_sensor DESC LIMIT 1',(id_sensor,));dato=c.fetchone()
+            if not dato:return jsonify(error='Sin datos disponibles'),404
+            return jsonify(dict(calidad(c,id_sensor,dato),unidad=s['unidad_medida']))
+    app.view_functions['datos_actuales']=actual
+    original_estado_sensor=app.view_functions['verificar_estado']
+    @login
+    def estado(id_sensor):
+        with bd() as (_,c):
+            s=sensor_permitido(c,id_sensor)
+            if not s:return jsonify(error='Sensor no encontrado'),404
+            if s['tipo_sensor'].strip().lower() not in TIPOS_AGUA:
+                return original_estado_sensor(id_sensor)
+        r=app.make_response(actual(id_sensor))
+        if r.status_code!=200:return r
+        d=r.get_json();activo=d.get('valor') is not None and d.get('estado_rango')!='sin_datos_recientes' and d.get('estado_medicion') in (None,'ok','sin_calibrar')
+        return jsonify(activo=activo,ultima_lectura=d,estado_medicion=d.get('estado_medicion'))
+    app.view_functions['verificar_estado']=estado
+
+    original_analitica=app.view_functions['obtener_analitica']
+    @login
+    def analitica(id_sensor,rango):
+        try:
+            with bd() as (_,c):
+                s=sensor_permitido(c,id_sensor)
+                if not s:return jsonify(error='No autorizado'),403
+                if s['tipo_sensor'].strip().lower() not in TIPOS_AGUA:
+                    return original_analitica(id_sensor,rango)
+                from datetime import timedelta
+                inicio=datetime.now()-timedelta(hours={'24h':24,'semana':168}.get(rango,1))
+                try:
+                    c.execute('''SELECT r.idRegistro_sensor,r.fecha_hora,r.valor,
+                        COALESCE(m.estado,'sin_metadatos') AS estado_medicion,m.idMedicion,
+                        m.calibrado,m.tds_ppm,m.voltaje,m.temperatura_c
+                        FROM registro_sensores r LEFT JOIN mediciones_agua m
+                        ON m.idRegistro_sensor=r.idRegistro_sensor
+                        WHERE r.idSensor=%s AND r.fecha_hora>=%s
+                        ORDER BY r.fecha_hora,r.idRegistro_sensor''',(id_sensor,inicio))
+                    datos=c.fetchall()
+                    c.execute('''SELECT fecha_hora,NULL AS valor,estado AS estado_medicion,
+                        calibrado,tds_ppm,voltaje,temperatura_c,idMedicion
+                        FROM mediciones_agua WHERE idSensor=%s AND fecha_hora>=%s
+                        AND idRegistro_sensor IS NULL ORDER BY fecha_hora,idMedicion''',(id_sensor,inicio))
+                    datos+=c.fetchall()
+                except mysql.connector.Error as e:
+                    if e.errno!=1146:raise
+                    c.execute('''SELECT fecha_hora,valor FROM registro_sensores
+                        WHERE idSensor=%s AND fecha_hora>=%s ORDER BY fecha_hora,idRegistro_sensor''',(id_sensor,inicio))
+                    datos=[dict(d,estado_medicion='sin_metadatos') for d in c.fetchall()]
+                datos.sort(key=lambda d:(d['fecha_hora'],d.get('idMedicion') or 0,d.get('idRegistro_sensor') or 0))
+                for d in datos:
+                    d.pop('idRegistro_sensor',None);d.pop('idMedicion',None)
+                    if isinstance(d['fecha_hora'],datetime):
+                        d['fecha_hora']=d['fecha_hora'].strftime('%Y-%m-%d %H:%M:%S')
+                return jsonify(datos)
+        except Exception:
+            app.logger.exception('Error consultando historial de agua')
+            return jsonify(error='No se pudo consultar el historial de agua'),500
+    app.view_functions['obtener_analitica']=analitica
+
+    original_estado=n['estado_dispositivo']
+    def estado_dispositivo(c,did):
+        datos=original_estado(c,did)
+        for d in datos:
+            if d['tipo_sensor'].strip().lower() in TIPOS_AGUA:
+                nueva=ultima(c,d['idSensor'])
+                if nueva:d.update(calidad(c,d['idSensor'],nueva))
+                else:d.update(estado_medicion='sin_metadatos',estado_rango='sin_metadatos')
+        return datos
+    n['estado_dispositivo']=estado_dispositivo
+    original_previa=n['construir_previa']
+    def previa(c,did,cultivo,etapa):
+        r=original_previa(c,did,cultivo,etapa)
+        for s in r['sensores']:
+            if s['tipo']=='ec' and s['disponible']:
+                factor=n['factor_unidades'](s['unidad'],'mS/cm')
+                if factor is not None and s['maximo']*factor>=2:
+                    s.update(disponible=False,detalle='El perfil alcanza o supera 2.0 mS/cm: requiere un instrumento de mayor rango. No se modificaron los límites del cultivo.')
+        return r
+    n['construir_previa']=previa
+
+    original_agregar=app.view_functions['agregar_sensor']
+    @login
+    def agregar():
+        d=request.get_json(silent=True) or {};tipo=str(d.get('tipo','')).strip().lower()
+        if tipo not in TIPOS_AGUA:return original_agregar()
+        try:
+            _agua_validar_unidad(tipo,d.get('unidad'))
+            with bd() as (cx,c):
+                c.execute('SELECT idDispositivo FROM dispositivos WHERE idDispositivo=%s AND idUsuario=%s FOR UPDATE',(d.get('idDispositivo'),n['get_id_usuario']()))
+                if not c.fetchone():return jsonify(status='error',mensaje='Dispositivo no encontrado'),404
+                c.execute('SELECT idSensore FROM sensores WHERE idDispositivo=%s AND LOWER(TRIM(tipo_sensor))=%s',(d['idDispositivo'],tipo))
+                if c.fetchall():return jsonify(status='error',mensaje='Ese sensor ya existe en el dispositivo'),409
+                c.execute('INSERT INTO sensores (tipo_sensor,unidad_medida,idDispositivo) VALUES (%s,%s,%s)',(tipo,d['unidad'],d['idDispositivo']));cx.commit()
+                return jsonify(status='success')
+        except ValueError as e:return jsonify(status='error',mensaje=str(e)),400
+    app.view_functions['agregar_sensor']=agregar
+    original_editar=app.view_functions['editar_sensor']
+    @login
+    def editar(id_sensor):
+        d=request.get_json(silent=True) or {}
+        with bd() as (_,c):
+            s=sensor_permitido(c,id_sensor)
+            if not s:return jsonify(status='error',mensaje='Sensor no encontrado'),404
+            old=s['tipo_sensor'].strip().lower();new=str(d.get('tipo','')).strip().lower()
+            if old in TIPOS_AGUA or new in TIPOS_AGUA:
+                if old!=new or _agua_unidad(s['unidad_medida'])!=_agua_unidad(d.get('unidad')):
+                    return jsonify(status='error',mensaje='Se conserva el tipo y la unidad del historial. Usa Integrar sensores de agua para agregar el sensor faltante.'),409
+        return original_editar(id_sensor)
+    app.view_functions['editar_sensor']=editar
+
+
+SQL_TABLA_MEDICIONES_AGUA = 'CREATE TABLE IF NOT EXISTS mediciones_agua (\n idMedicion BIGINT NOT NULL AUTO_INCREMENT,\n idSensor INT NOT NULL,\n idRegistro_sensor INT NULL,\n estado VARCHAR(32) NOT NULL,\n calibrado TINYINT(1) NOT NULL DEFAULT 0,\n voltaje DECIMAL(8,5) NULL,\n tds_ppm DECIMAL(12,4) NULL,\n factor_k DECIMAL(10,6) NULL,\n temperatura_c DECIMAL(7,3) NULL,\n fecha_hora DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n PRIMARY KEY (idMedicion),\n UNIQUE KEY uq_agua_registro (idRegistro_sensor),\n KEY idx_agua_sensor_fecha (idSensor,fecha_hora,idMedicion),\n CONSTRAINT fk_agua_sensor FOREIGN KEY (idSensor) REFERENCES sensores(idSensore) ON DELETE CASCADE,\n CONSTRAINT fk_agua_registro FOREIGN KEY (idRegistro_sensor) REFERENCES registro_sensores(idRegistro_sensor) ON DELETE CASCADE\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;'
+
+
+def preparar_bd_agua():
+    """Crear la tabla adicional de diagnósticos. Solo por comando explícito."""
+    conexion=cursor=None
+    try:
+        conexion=conectar_bd()
+        cursor=conexion.cursor()
+        cursor.execute(SQL_TABLA_MEDICIONES_AGUA)
+        conexion.commit()
+    except Exception:
+        if conexion is not None:conexion.rollback()
+        raise
+    finally:
+        if cursor is not None:cursor.close()
+        if conexion is not None:conexion.close()
+
+
+_agua_instalar(globals())
+
+
+if __name__ == '__main__':
+    import argparse
+    parser=argparse.ArgumentParser(description='Servidor AeroGarden')
+    parser.add_argument('--preparar-agua',action='store_true',
+                        help='Crear la tabla adicional de sensores de agua y salir')
+    argumentos=parser.parse_args()
+    if argumentos.preparar_agua:
+        try:
+            preparar_bd_agua()
+        except Exception as error:
+            print('No se pudo preparar la tabla de agua:',error)
+            raise SystemExit(1)
+        print('Tabla mediciones_agua lista. Los sensores y las lecturas existentes se conservan.')
+    else:
+        app.run(
+            debug=os.environ.get('FLASK_DEBUG', 'False') == 'True',
+            host='0.0.0.0',
+            port=int(os.environ.get('PORT', 5000))
+        )

@@ -1,3 +1,171 @@
+// Sensores de agua: DS18B20 y EC/TDS. Compatible con app.py del paso 2.
+// TDS se muestra como estimación asociada a EC, no como otro sensor físico.
+const AGUA_ESTADOS_TEXTO = Object.freeze({
+    sin_calibrar: 'EC estimada · sin calibrar',
+    sin_metadatos: 'Medición sin verificación de calibración',
+    sin_temperatura: 'Sin temperatura válida para compensar la EC',
+    sin_sensor: 'Sensor sin lectura válida',
+    iniciando: 'Esperando la primera lectura',
+    senal_baja: 'Señal muy baja · revisar inmersión y conexiones',
+    fuera_rango: 'Fuera del rango del módulo TDS',
+    calibrando: 'Calibración en curso',
+    lectura_invalida: 'Lectura inválida'
+});
+const AGUA_REGISTROS_PENDIENTES = new Set();
+let revisionPanelSensores = 0;
+let revisionVisualizacionSensores = 0;
+let revisionHistorialSensores = 0;
+let intervaloPanelSensoresAgua = null;
+
+function escaparTextoSensor(texto) {
+    return String(texto ?? '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[c]);
+}
+
+function numeroLecturaSensor(valor) {
+    if (valor === null || valor === undefined || typeof valor === 'boolean' ||
+        (typeof valor === 'string' && !valor.trim())) return null;
+    if (typeof valor !== 'number' && typeof valor !== 'string') return null;
+    const numero = Number(valor);
+    return Number.isFinite(numero) ? numero : null;
+}
+
+function nombreSensorAgua(tipo) {
+    return ({ec: 'EC estimada', temperatura_agua: 'Temperatura del agua (DS18B20)'})[
+        String(tipo || '').trim().toLowerCase()] || tipo || 'Sensor';
+}
+
+function textoCalidadAgua(dato) {
+    if (!dato?.estado_medicion) return '';
+    if (dato.estado_medicion === 'ok') {
+        return dato.factor_k != null || dato.tds_ppm != null
+            ? 'EC estimada · calibrada a un punto' : 'Lectura válida';
+    }
+    return AGUA_ESTADOS_TEXTO[dato.estado_medicion] || 'Revisar estado de la medición';
+}
+
+function valorGraficaSensor(dato) {
+    if (dato?.estado_medicion && !['ok', 'sin_calibrar', 'sin_metadatos'].includes(dato.estado_medicion)) return null;
+    return numeroLecturaSensor(dato?.valor);
+}
+
+function edadLecturaSensor(dato) {
+    const edad = numeroLecturaSensor(dato?.edad_segundos);
+    if (edad !== null) return Math.max(0, edad);
+    if (!dato?.fecha_hora) return null;
+    const fecha = new Date(String(dato.fecha_hora).replace(' ', 'T')).getTime();
+    return Number.isFinite(fecha) ? Math.max(0, (Date.now() - fecha) / 1000) : null;
+}
+
+function lecturaSensorAntigua(dato) {
+    const edad = edadLecturaSensor(dato);
+    return dato?.estado_rango === 'sin_datos_recientes' || edad === null || edad > 30;
+}
+
+function colorCalidadSensor(dato) {
+    if (valorGraficaSensor(dato) === null) return '#9b6500';
+    return dato?.estado_medicion && dato.estado_medicion !== 'ok' ? '#b8790b' : '#287454';
+}
+
+function detalleTDSSensor(dato) {
+    const tds = numeroLecturaSensor(dato?.tds_ppm);
+    return valorGraficaSensor(dato) !== null && tds !== null &&
+        ['ok', 'sin_calibrar'].includes(dato?.estado_medicion)
+        ? `TDS estimado: ${tds.toLocaleString('es-MX', {maximumFractionDigits: 1})} ppm · factor 0.5` : '';
+}
+
+async function pedirDatosSensor(url, opciones = {}) {
+    const respuesta = await fetch(url, {credentials: 'same-origin', ...opciones});
+    let dato;
+    try { dato = await respuesta.json(); }
+    catch (_) { throw new Error('El servidor no devolvió una respuesta válida.'); }
+    if (!respuesta.ok) throw new Error(dato?.error || dato?.mensaje || 'No se pudo completar la solicitud.');
+    if (dato?.error) throw new Error(dato.error);
+    return dato;
+}
+
+function montarOpcionesSensoresAgua() {
+    for (const id of ['tipoSensor', 'editTipoSensor']) {
+        const select = document.getElementById(id);
+        if (!select) continue;
+        if (![...select.options].some(o => o.value === 'temperatura_agua')) {
+            select.add(new Option('Temperatura del agua (DS18B20)', 'temperatura_agua'));
+        }
+        const ec = [...select.options].find(o => o.value === 'ec');
+        if (ec) ec.textContent = 'EC estimada (módulo TDS)';
+    }
+    for (const id of ['unidadMedida', 'editUnidadMedida']) {
+        const select = document.getElementById(id);
+        if (!select) continue;
+        for (const [valor, texto] of [['°C', '°C (Temperatura)'], ['mS/cm', 'mS/cm (EC)'],
+            ['µS/cm', 'µS/cm (EC)'], ['uS/cm', 'uS/cm (EC)'], ['μS/cm', 'μS/cm (EC)']]) {
+            if (![...select.options].some(o => o.value === valor)) select.add(new Option(texto, valor));
+        }
+    }
+    const tipo = document.getElementById('tipoSensor');
+    if (tipo && !tipo.dataset.aguaPreparada) {
+        tipo.dataset.aguaPreparada = '1';
+        tipo.addEventListener('change', () => {
+            if (tipo.value === 'temperatura_agua') document.getElementById('unidadMedida').value = '°C';
+        });
+    }
+    const logica = document.getElementById('selectSensorLogica');
+    if (logica && !logica.dataset.aguaPreparada) {
+        logica.dataset.aguaPreparada = '1';
+        logica.addEventListener('change', limpiarVisualizacion);
+    }
+    const analitica = document.getElementById('selectSensorAnalitica');
+    if (analitica && !analitica.dataset.aguaPreparada) {
+        analitica.dataset.aguaPreparada = '1';
+        analitica.addEventListener('change', () => {
+            ++revisionHistorialSensores;
+            if (miGrafica) miGrafica.destroy();
+            miGrafica = null;
+        });
+    }
+    if (intervaloPanelSensoresAgua === null) {
+        let consultando = false;
+        intervaloPanelSensoresAgua = setInterval(async () => {
+            const inicio = document.getElementById('dashboard-contenido');
+            if (consultando || document.hidden || !inicio || getComputedStyle(inicio).display === 'none') return;
+            consultando = true;
+            try { await _panelLecturas(); }
+            finally { consultando = false; }
+        }, 10000);
+    }
+}
+
+async function integrarSensoresAgua(idDispositivo) {
+    const id = Number(idDispositivo);
+    if (!Number.isInteger(id) || id <= 0 || AGUA_REGISTROS_PENDIENTES.has(id)) return;
+    AGUA_REGISTROS_PENDIENTES.add(id);
+    const botones = [...document.querySelectorAll(`[data-agua-dispositivo="${id}"]`)];
+    botones.forEach(b => { b.disabled = true; b.textContent = 'Preparando sensores…'; });
+    try {
+        await pedirDatosSensor(`/api/dispositivos/${id}/integrar-sensores-agua`, {method: 'POST'});
+        toast('Sensores de agua registrados. Los sensores existentes conservaron sus datos.', 'success');
+        const resultados = await Promise.allSettled([
+            actualizarListaDispositivos(), cargarSensoresEnLogica(), cargarSensoresEnAnalitica(), _panelLecturas(), _kpiDispSensores()
+        ]);
+        if (resultados.some(r => r.status === 'rejected')) {
+            toast('El registro terminó. Recarga la página para actualizar las listas.', 'info');
+        }
+    } catch (error) {
+        toast(escaparTextoSensor(error.message), 'error');
+    } finally {
+        AGUA_REGISTROS_PENDIENTES.delete(id);
+        botones.forEach(b => { b.disabled = false; b.textContent = 'Integrar sensores de agua'; });
+    }
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', montarOpcionesSensoresAgua);
+} else {
+    montarOpcionesSensoresAgua();
+}
+
+
 // HYDROSENSE - HISTORIAL DE ALERTAS INTEGRADO - 29/09/2026
 function toast(mensaje, tipo = 'info', duracion = 3500) {
     let contenedor = document.getElementById('toast-contenedor');
@@ -410,6 +578,9 @@ async function actualizarListaDispositivos() {
                         <span class="badge ${sensoresDev.length > 0 ? 'badge-verde' : 'badge-gris'}">
                             ${sensoresDev.length} sensor${sensoresDev.length !== 1 ? 'es' : ''}
                         </span>
+                        ${d.rol === 'dueno' ? `<button type="button" class="btn-verde btn-sm"
+                            data-agua-dispositivo="${d.idDispositivo}" onclick="integrarSensoresAgua(${d.idDispositivo})">
+                            Integrar sensores de agua</button>` : ''}
                         <button onclick="eliminarDispositivo(${d.idDispositivo}, '${d.nombre}')"
                             style="padding:4px 10px; border-radius:6px; border:1px solid
                                    color:#e74c3c; background:white; cursor:pointer; font-size:12px;">
@@ -475,17 +646,25 @@ async function eliminarDispositivo(id, nombre) {
 }
 
 function abrirEditarSensor(id, tipo, unidad, idDispositivo) {
-    document.getElementById('editSensorId').value        = id;
+    montarOpcionesSensoresAgua();
+    document.getElementById('editSensorId').value = id;
     document.getElementById('editSensorIdDispositivo').value = idDispositivo;
-
     const tipoSel = document.getElementById('editTipoSensor');
-    for (let opt of tipoSel.options) {
-        if (opt.value === tipo) { opt.selected = true; break; }
-    }
     const unidadSel = document.getElementById('editUnidadMedida');
-    for (let opt of unidadSel.options) {
-        if (opt.value === unidad) { opt.selected = true; break; }
+    for (const [select, valor] of [[tipoSel, tipo], [unidadSel, unidad]]) {
+        if (![...select.options].some(o => o.value === valor)) select.add(new Option(valor, valor));
+        select.value = valor;
     }
+    const esAgua = ['ec', 'temperatura_agua'].includes(String(tipo).trim().toLowerCase());
+    tipoSel.disabled = unidadSel.disabled = esAgua;
+    let nota = document.getElementById('nota-editar-sensor-agua');
+    if (!nota) {
+        nota = document.createElement('p'); nota.id = 'nota-editar-sensor-agua';
+        nota.style.cssText = 'font-size:12px;color:#68756b;';
+        unidadSel.insertAdjacentElement('afterend', nota);
+    }
+    nota.textContent = esAgua ? 'El tipo y la unidad se conservan para mantener comparable el historial.' : '';
+    nota.hidden = !esAgua;
     document.getElementById('modal-editar-sensor').style.display = 'flex';
 }
 
@@ -556,12 +735,15 @@ async function guardarSensor() {
         actualizarListaDispositivos();
         cargarSensoresEnLogica();
         cargarSensoresEnAnalitica();
+    } else {
+        toast(escaparTextoSensor(result.mensaje || result.error || 'No se pudo guardar el sensor'), 'error');
     }
 }
 
 async function cargarSensoresEnAnalitica() {
     const select = document.getElementById('selectSensorAnalitica');
     if (!select) return;
+    const seleccionado = select.value;
     try {
         const response = await fetch('/api/sensores/lista');
         const sensores = await response.json();
@@ -569,14 +751,16 @@ async function cargarSensoresEnAnalitica() {
         sensores.forEach(s => {
             let o = document.createElement('option');
             o.value = s.idSensore;
-            o.text = `${s.tipo_sensor} – ${s.unidad_medida || ''} (ID: ${s.idSensore})`;
+            o.text = `${nombreSensorAgua(s.tipo_sensor)} – ${s.unidad_medida || ''} (ID: ${s.idSensore})`;
             select.add(o);
         });
+        if ([...select.options].some(o => o.value === seleccionado)) select.value = seleccionado;
     } catch (e) { console.error("Error cargando sensores analítica:", e); }
 }
 async function cargarSensoresEnLogica() {
     const select = document.getElementById('selectSensorLogica');
     if (!select) return;
+    const seleccionado = select.value;
     try {
         const response = await fetch('/api/sensores/lista');
         const sensores = await response.json();
@@ -584,9 +768,10 @@ async function cargarSensoresEnLogica() {
         sensores.forEach(s => {
             let o = document.createElement('option');
             o.value = s.idSensore;
-            o.text = `${s.tipo_sensor} – ${s.unidad_medida || ''} (ID: ${s.idSensore})`;
+            o.text = `${nombreSensorAgua(s.tipo_sensor)} – ${s.unidad_medida || ''} (ID: ${s.idSensore})`;
             select.add(o);
         });
+        if ([...select.options].some(o => o.value === seleccionado)) select.value = seleccionado;
     } catch (e) {
         console.error("Error cargando sensores en lógica:", e);
     }
@@ -594,173 +779,155 @@ async function cargarSensoresEnLogica() {
 
 async function verificarEstadoSensor() {
     const idSensor = document.getElementById('selectSensorLogica').value;
-    if (!idSensor) return toast("Selecciona un sensor primero", "warning");
-
+    if (!idSensor) return toast('Selecciona un sensor primero', 'warning');
+    limpiarVisualizacion();
+    const turno = revisionVisualizacionSensores;
     const contenedor = document.getElementById('resultado-logica');
-    contenedor.innerHTML = '<p style="color:#888;">Verificando...</p>';
-
+    contenedor.textContent = 'Consultando lectura…';
     try {
-        const response = await fetch(`/api/sensores/estado/${idSensor}`);
-        const data = await response.json();
-        const activo = data.activo;
-        const ultimaLectura = data.ultima_lectura || null;
-
-        contenedor.innerHTML = `
-            <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                <div style="font-size:32px;">${activo ? '✅' : '❌'}</div>
-                <div>
-                    <div style="font-size:16px; font-weight:600;">${activo ? 'Sensor Funcionando' : 'Sensor Desconectado'}</div>
-                    <div style="font-size:13px; color:#666;">Sensor ID: ${idSensor}</div>
-                    ${ultimaLectura ? `<div style="font-size:13px; color:#666;">Última lectura: <strong>${ultimaLectura.valor} ${ultimaLectura.unidad}</strong> — ${ultimaLectura.fecha_hora}</div>` : ''}
-                </div>
-            </div>`;
-    } catch (e) {
-        contenedor.innerHTML = '<p style="color:red;">Error al verificar el sensor.</p>';
+        const data = await pedirDatosSensor(`/api/sensores/estado/${idSensor}`);
+        if (turno !== revisionVisualizacionSensores || document.getElementById('selectSensorLogica').value !== idSensor) return;
+        const dato = data.ultima_lectura;
+        const valor = valorGraficaSensor(dato);
+        const antiguo = lecturaSensorAntigua(dato);
+        const estado = !dato ? 'Sin datos disponibles' : antiguo ? 'Sin datos recientes' :
+            valor === null ? 'Sin lectura válida' : 'Lectura recibida';
+        const calidad = textoCalidadAgua(dato);
+        const tds = detalleTDSSensor(dato);
+        contenedor.innerHTML = `<div style="line-height:1.7;">
+            <strong>${estado}</strong><div>Sensor ID: ${escaparTextoSensor(idSensor)}</div>
+            ${calidad ? `<div style="color:${colorCalidadSensor(dato)};">${escaparTextoSensor(calidad)}</div>` : ''}
+            <div>${antiguo ? 'Último dato' : 'Lectura'}: <strong>${valor === null ? '—' : escaparTextoSensor(valor)} ${valor === null ? '' : escaparTextoSensor(dato?.unidad)}</strong></div>
+            ${tds ? `<div>${escaparTextoSensor(tds)}</div>` : ''}
+            ${dato?.fecha_hora ? `<div>${escaparTextoSensor(dato.fecha_hora)}</div>` : ''}
+        </div>`;
+    } catch (error) {
+        if (turno === revisionVisualizacionSensores) contenedor.textContent = error.message;
     }
 }
+
 let intervaloVisualizacion = null;
 let graficaTiempoReal      = null;
 const MAX_PUNTOS_GRAFICA   = 30;
 
 function visualizarInformacion() {
-    const idSensor = document.getElementById('selectSensorLogica').value;
-    if (!idSensor) return toast("Selecciona un sensor primero", "warning");
-    if (intervaloVisualizacion) clearInterval(intervaloVisualizacion);
-
+    const select = document.getElementById('selectSensorLogica');
+    const idSensor = select.value;
+    if (!idSensor) return toast('Selecciona un sensor primero', 'warning');
+    limpiarVisualizacion();
+    const turno = revisionVisualizacionSensores;
     const contenedor = document.getElementById('resultado-logica');
-    const select   = document.getElementById('selectSensorLogica');
     const etiqueta = select.options[select.selectedIndex]?.text || `Sensor ${idSensor}`;
-
-    contenedor.innerHTML = `
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
-            <div>
-                <strong>📡 ${etiqueta}</strong>
-                <span id="valor-actual-badge" style="display:inline-block; margin-left:10px; font-size:18px; font-weight:700; color:#2c3e50;">--</span>
-            </div>
-            <div style="display:flex; gap:6px; align-items:center;">
-                <span id="estado-live" style="font-size:12px; color:#27ae60; font-weight:600;">● EN VIVO</span>
-                <button class="btn-rojo btn-sm" onclick="limpiarVisualizacion()">⏹ Detener</button>
-            </div>
+    contenedor.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+        <div><strong>${escaparTextoSensor(etiqueta)}</strong>
+            <span id="valor-actual-badge" style="margin-left:10px;font-size:18px;font-weight:700;">—</span>
+            <div id="tds-actual-detalle" style="font-size:12px;color:#68756b;"></div>
         </div>
-        <canvas id="graficaTiempoReal" height="120"></canvas>`;
-    const ctx = document.getElementById('graficaTiempoReal').getContext('2d');
-    if (graficaTiempoReal) graficaTiempoReal.destroy();
-
-    graficaTiempoReal = new Chart(ctx, {
+        <div style="display:flex;gap:8px;align-items:center;">
+            <span id="estado-live" role="status" style="font-size:12px;">Consultando…</span>
+            <button class="btn-rojo btn-sm" onclick="limpiarVisualizacion()">⏹ Detener</button>
+        </div></div><canvas id="graficaTiempoReal" height="120"></canvas>`;
+    const estados = [];
+    const grafica = new Chart(document.getElementById('graficaTiempoReal').getContext('2d'), {
         type: 'line',
-        data: {
-            labels: [],
-            datasets: [{
-                label: etiqueta,
-                data: [],
-                borderColor: 'rgb(44, 62, 80)',
-                backgroundColor: 'rgba(44, 62, 80, 0.08)',
-                borderWidth: 2,
-                tension: 0.4,
-                pointRadius: 3,
-                fill: true
-            }]
-        },
-        options: {
-            responsive: true,
-            animation: { duration: 300 },
-            scales: {
-                x: { ticks: { maxTicksLimit: 8, font: { size: 11 } } },
-                y: { beginAtZero: false, ticks: { font: { size: 11 } } }
-            },
-            plugins: {
-                legend: { display: false },
-                tooltip: { callbacks: { label: ctx => ` ${ctx.parsed.y}` } }
-            }
-        }
+        data: {labels: [], datasets: [{label: etiqueta, data: [], borderColor: '#2c3e50',
+            backgroundColor: 'rgba(44,62,80,0.08)', pointBackgroundColor: [], borderWidth: 2,
+            tension: 0.25, pointRadius: 3, fill: true, spanGaps: false}]},
+        options: {responsive: true, animation: {duration: 300},
+            scales: {x: {ticks: {maxTicksLimit: 8}}, y: {beginAtZero: false}},
+            plugins: {legend: {display: false}, tooltip: {callbacks: {
+                afterLabel: ctx => textoCalidadAgua(estados[ctx.dataIndex])
+            }}}}
     });
+    graficaTiempoReal = grafica;
+    let ultimaClave = null, consultando = false;
+    const sigueActiva = () => turno === revisionVisualizacionSensores && graficaTiempoReal === grafica;
     async function obtenerYGraficar() {
-        try {
-            const res  = await fetch(`/api/sensores/datos-actuales/${idSensor}`);
-            const data = await res.json();
-
-            if (data.error) {
-                document.getElementById('estado-live').textContent = '⚠ Sin datos';
-                document.getElementById('estado-live').style.color = '#e67e22';
-                return;
-            }
-
-            const ahora = new Date().toLocaleTimeString();
-            const valor = parseFloat(data.valor);
-            const badge = document.getElementById('valor-actual-badge');
-            if (badge) badge.textContent = `${data.valor} ${data.unidad || ''}`;
-            graficaTiempoReal.data.labels.push(ahora);
-            graficaTiempoReal.data.datasets[0].data.push(valor);
-
-                        if (graficaTiempoReal.data.labels.length > MAX_PUNTOS_GRAFICA) {
-                graficaTiempoReal.data.labels.shift();
-                graficaTiempoReal.data.datasets[0].data.shift();
-            }
-
-            graficaTiempoReal.update();
-        } catch (e) {
-            console.error("Error obteniendo dato:", e);
+        if (document.getElementById('selectSensorLogica').value !== idSensor) {
+            if (sigueActiva()) limpiarVisualizacion();
+            return;
         }
+        if (!sigueActiva() || consultando) return;
+        consultando = true;
+        try {
+            const dato = await pedirDatosSensor(`/api/sensores/datos-actuales/${idSensor}`);
+            if (!sigueActiva() || select.value !== idSensor) return;
+            const valor = valorGraficaSensor(dato);
+            const antiguo = lecturaSensorAntigua(dato);
+            document.getElementById('valor-actual-badge').textContent = valor === null ? '—' : `${valor} ${dato.unidad || ''}`;
+            document.getElementById('tds-actual-detalle').textContent = detalleTDSSensor(dato);
+            const estado = document.getElementById('estado-live');
+            estado.textContent = (antiguo ? 'Sin datos recientes · ' : '') +
+                (textoCalidadAgua(dato) || (valor === null ? 'Sin lectura válida' : 'Lectura recibida')) +
+                (dato.fecha_hora ? ' · ' + dato.fecha_hora : '');
+            estado.style.color = antiguo ? '#777' : colorCalidadSensor(dato);
+            const clave = `${dato.fecha_hora}|${dato.estado_medicion || ''}`;
+            if (!dato.fecha_hora || clave === ultimaClave || antiguo) return;
+            ultimaClave = clave;
+            grafica.data.labels.push(dato.fecha_hora);
+            grafica.data.datasets[0].data.push(valor);
+            grafica.data.datasets[0].pointBackgroundColor.push(colorCalidadSensor(dato));
+            estados.push(dato);
+            if (grafica.data.labels.length > MAX_PUNTOS_GRAFICA) {
+                grafica.data.labels.shift(); grafica.data.datasets[0].data.shift();
+                grafica.data.datasets[0].pointBackgroundColor.shift(); estados.shift();
+            }
+            grafica.update();
+        } catch (_) {
+            if (!sigueActiva()) return;
+            document.getElementById('valor-actual-badge').textContent = '—';
+            document.getElementById('tds-actual-detalle').textContent = '';
+            document.getElementById('estado-live').textContent = 'No se pudo consultar la lectura';
+            document.getElementById('estado-live').style.color = '#9b6500';
+        } finally { consultando = false; }
     }
-
     obtenerYGraficar();
     intervaloVisualizacion = setInterval(obtenerYGraficar, 2000);
 }
 
 function limpiarVisualizacion() {
-    if (intervaloVisualizacion) {
-        clearInterval(intervaloVisualizacion);
-        intervaloVisualizacion = null;
-    }
-    if (graficaTiempoReal) {
-        graficaTiempoReal.destroy();
-        graficaTiempoReal = null;
-    }
-    document.getElementById('resultado-logica').innerHTML = '';
+    ++revisionVisualizacionSensores;
+    if (intervaloVisualizacion !== null) clearInterval(intervaloVisualizacion);
+    intervaloVisualizacion = null;
+    if (graficaTiempoReal) graficaTiempoReal.destroy();
+    graficaTiempoReal = null;
+    const contenedor = document.getElementById('resultado-logica');
+    if (contenedor) contenedor.replaceChildren();
 }
+
 let miGrafica = null;
 
 async function cargarGrafica(rango) {
-    const idSensor = document.getElementById('selectSensorAnalitica').value;
-    if (!idSensor) return toast("Selecciona un sensor primero", "warning");
-
-    const response = await fetch(`/api/sensores/analitica/${idSensor}/${rango}`);
-    const datos    = await response.json();
-
-    if (datos.error) return toast("Error: " + datos.error, "error");
-
-    const ctx = document.getElementById('graficaSensor').getContext('2d');
-    if (miGrafica) miGrafica.destroy();
-
-    const etiquetaRango = { 'ahora': 'Última 1 hora', '24h': 'Últimas 24 horas', 'semana': 'Última semana' }[rango] || rango;
-
-    miGrafica = new Chart(ctx, {
-        type: 'line',
-        data: {
-            labels: datos.map(d => new Date(d.fecha_hora).toLocaleTimeString()),
-            datasets: [{
-                label: etiquetaRango,
-                data: datos.map(d => d.valor),
-                borderColor: 'rgb(44, 62, 80)',
-                backgroundColor: 'rgba(44, 62, 80, 0.08)',
-                borderWidth: 2,
-                tension: 0.4,
-                fill: true,
-                pointRadius: datos.length > 50 ? 0 : 3
-            }]
-        },
-        options: {
-            responsive: true,
-            plugins: {
-                legend: { display: true },
-                tooltip: { mode: 'index', intersect: false }
-            },
-            scales: {
-                x: { ticks: { maxTicksLimit: 10 } }
-            }
-        }
-    });
+    const select = document.getElementById('selectSensorAnalitica');
+    const idSensor = select.value;
+    if (!idSensor) return toast('Selecciona un sensor primero', 'warning');
+    const turno = ++revisionHistorialSensores;
+    try {
+        const datos = await pedirDatosSensor(`/api/sensores/analitica/${idSensor}/${rango}`);
+        if (turno !== revisionHistorialSensores || select.value !== idSensor) return;
+        if (!Array.isArray(datos)) throw new Error('Historial no válido.');
+        if (miGrafica) miGrafica.destroy();
+        const etiqueta = select.options[select.selectedIndex]?.text || `Sensor ${idSensor}`;
+        const periodo = {ahora: 'Última hora', '24h': 'Últimas 24 horas', semana: 'Última semana'}[rango] || rango;
+        miGrafica = new Chart(document.getElementById('graficaSensor').getContext('2d'), {
+            type: 'line',
+            data: {labels: datos.map(d => d.fecha_hora), datasets: [{label: `${etiqueta} · ${periodo}`,
+                data: datos.map(valorGraficaSensor), spanGaps: false,
+                pointBackgroundColor: datos.map(colorCalidadSensor), borderColor: '#2c3e50',
+                backgroundColor: 'rgba(44,62,80,0.08)', borderWidth: 2, tension: 0.25,
+                fill: true, pointRadius: datos.length > 50 ? 0 : 3}]},
+            options: {responsive: true, plugins: {legend: {display: true},
+                subtitle: {display: datos.some(d => d.estado_medicion),
+                    text: 'Puntos ámbar: lecturas provisionales. Los huecos indican lecturas no válidas.'},
+                tooltip: {mode: 'index', intersect: false, callbacks: {afterLabel: ctx =>
+                    [textoCalidadAgua(datos[ctx.dataIndex]), detalleTDSSensor(datos[ctx.dataIndex])].filter(Boolean)}}},
+                scales: {x: {ticks: {maxTicksLimit: 10}}}}
+        });
+    } catch (error) {
+        if (turno === revisionHistorialSensores) toast(escaparTextoSensor(error.message), 'error');
+    }
 }
+
 async function cargarTiposCultivo() {
     const select = document.getElementById('selectTipoCultivo');
     if (!select) return;
@@ -1808,75 +1975,50 @@ async function _kpiAlertas() {
 async function _panelLecturas() {
     const cont = document.getElementById('inicio-lecturas');
     if (!cont) return;
+    const turno = ++revisionPanelSensores;
     try {
-        const res      = await fetch('/api/sensores/lista');
-        const sensores = await res.json();
-        if (!Array.isArray(sensores) || sensores.length === 0) {
-            cont.innerHTML = `<div class="inicio-vacio">${t('inicio_sin_sensores')}</div>`; return;
+        const sensores = await pedirDatosSensor('/api/sensores/lista');
+        if (!Array.isArray(sensores)) throw new Error('Lista de sensores no válida.');
+        const lecturas = await Promise.allSettled(sensores.map(s =>
+            pedirDatosSensor(`/api/sensores/datos-actuales/${s.idSensore}`)));
+        if (turno !== revisionPanelSensores) return;
+        if (!sensores.length) {
+            cont.innerHTML = `<div class="inicio-vacio">${escaparTextoSensor(t('inicio_sin_sensores'))}</div>`;
+            return;
         }
-        const slice    = sensores.slice(0, 6);
-        const lecturas = await Promise.allSettled(
-            slice.map(s => fetch(`/api/sensores/datos-actuales/${s.idSensore}`).then(r => r.json()))
-        );
-        const ahora = new Date();
-        cont.innerHTML = slice.map((s, i) => {
-            const lec      = lecturas[i].status === 'fulfilled' ? lecturas[i].value : null;
-            const hayDato  = lec && !lec.error;
-            const valor    = hayDato ? lec.valor  : null;
-            const unidad   = hayDato ? (lec.unidad || '') : '';
-            const fechaStr = hayDato ? lec.fecha_hora : null;
-
-            let segsAtras = null;
-            if (fechaStr) {
-                const diff = ahora - new Date(fechaStr.replace(' ', 'T'));
-                segsAtras  = Math.floor(diff / 1000);
-            }
-
-            const activo      = hayDato && segsAtras !== null && segsAtras <= 30;
-            const sinSenal    = hayDato && segsAtras !== null && segsAtras > 30 && segsAtras <= 300;
-            const desconectado = !hayDato || (segsAtras !== null && segsAtras > 300);
-
-            let estadoBadge = '';
-            let dotClass    = '';
-            if (activo) {
-                dotClass    = 'sensor-dot-on';
-                estadoBadge = `<span style="font-size:11px;color:#27ae60;font-weight:600;">${t('inicio_en_linea')}</span>`;
-            } else if (sinSenal) {
-                dotClass    = 'sensor-dot-off';
-                const mins  = segsAtras < 60 ? segsAtras + 's' : Math.floor(segsAtras/60) + 'm';
-                estadoBadge = `<span style="font-size:11px;color:#e67e22;font-weight:600;">⚠ ${t('inicio_sin_senal')} (${mins})</span>`;
-            } else {
-                dotClass    = 'sensor-dot-off';
-                estadoBadge = `<span style="font-size:11px;color:#bbb;">${t('inicio_desconectado')}</span>`;
-            }
-
-            let valorHtml = '';
-            if (valor !== null) {
-                const esViejo = sinSenal || desconectado;
-                valorHtml = `
-                    <div style="text-align:right;">
-                        <span class="sensor-valor-big" style="${esViejo ? 'color:#bbb;' : ''}">${valor}</span>
-                        <span class="sensor-unidad" style="${esViejo ? 'color:#ccc;' : ''}">${unidad}</span>
-                        ${esViejo ? `<div style="font-size:10px;color:#ccc;">${t('inicio_ultimo_dato')}</div>` : ''}
-                    </div>`;
-            } else {
-                valorHtml = `<div style="text-align:right;"><span style="color:#ccc;font-size:13px;">${t('inicio_sin_datos')}</span></div>`;
-            }
-
-            return `
-            <div class="sensor-fila">
-                <div style="display:flex;align-items:center;gap:8px;">
-                    <div class="sensor-dot ${dotClass}"></div>
+        cont.innerHTML = sensores.map((sensor, i) => {
+            const dato = lecturas[i].status === 'fulfilled' ? lecturas[i].value : null;
+            const valor = valorGraficaSensor(dato);
+            const antiguo = lecturaSensorAntigua(dato);
+            const provisional = dato?.estado_medicion && dato.estado_medicion !== 'ok';
+            const color = antiguo ? '#777' : colorCalidadSensor(dato);
+            const estado = !dato ? 'Sin datos disponibles' : antiguo ? 'Sin datos recientes' :
+                valor === null ? 'Sin lectura válida' : provisional ? 'Lectura provisional' : 'Lectura recibida';
+            const calidad = textoCalidadAgua(dato);
+            const tds = detalleTDSSensor(dato);
+            const nombreDispositivo = sensor.nombre_dispositivo || `Dispositivo ${sensor.idDispositivo}`;
+            const valorTexto = valor === null ? '—' : valor.toLocaleString('es-MX', {maximumFractionDigits: 4});
+            return `<div class="sensor-fila">
+                <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+                    <div class="sensor-dot ${!antiguo && !provisional && valor !== null ? 'sensor-dot-on' : 'sensor-dot-off'}"></div>
                     <div>
-                        <div class="sensor-nombre">${s.tipo_sensor}</div>
-                        <div>${estadoBadge}</div>
+                        <div class="sensor-nombre">${escaparTextoSensor(nombreSensorAgua(sensor.tipo_sensor))}</div>
+                        <div style="font-size:11px;color:#68756b;">${escaparTextoSensor(nombreDispositivo)} · ID ${escaparTextoSensor(sensor.idSensore)}</div>
+                        <div style="font-size:11px;color:${color};font-weight:600;">${estado}</div>
+                        ${calidad ? `<div style="font-size:11px;color:${color};">${escaparTextoSensor(calidad)}</div>` : ''}
+                        ${dato?.fecha_hora ? `<div style="font-size:10px;color:#777;">${escaparTextoSensor(dato.fecha_hora)}</div>` : ''}
                     </div>
                 </div>
-                ${valorHtml}
+                <div style="text-align:right;">
+                    <span class="sensor-valor-big" style="color:${color};">${valorTexto}</span>
+                    <span class="sensor-unidad">${valor === null ? '' : escaparTextoSensor(dato?.unidad || sensor.unidad_medida)}</span>
+                    ${antiguo && valor !== null ? '<div style="font-size:10px;color:#777;">Último dato recibido</div>' : ''}
+                    ${tds ? `<div style="font-size:11px;color:${color};">${escaparTextoSensor(tds)}</div>` : ''}
+                </div>
             </div>`;
         }).join('');
-    } catch (e) {
-        cont.innerHTML = '<div class="inicio-vacio" style="color:#e74c3c;">Error al cargar.</div>';
+    } catch (_) {
+        if (turno === revisionPanelSensores) cont.innerHTML = '<div class="inicio-vacio" style="color:#b23b3b;">No se pudieron consultar las lecturas.</div>';
     }
 }
 
@@ -2166,7 +2308,7 @@ const rangosHydrosense = (() => {
 'use strict';
 let montado = false, inicio = null;
 const $ = id => document.getElementById('hs-' + id);
-const estadoTexto = {en_rango:'En rango',bajo:'Bajo',alto:'Alto',alerta:'Alerta',sin_datos:'Sin datos',sin_datos_recientes:'Sin datos recientes',sin_alertas_activas:'Alertas inactivas',lectura_invalida:'Lectura inválida',rango_inconsistente:'Revisar límites'};
+const estadoTexto = {sin_calibrar:'Sin calibrar',sin_metadatos:'Calibración no verificada',sin_temperatura:'Sin temperatura válida',sin_sensor:'Sensor sin lectura',iniciando:'Iniciando',senal_baja:'Señal muy baja',fuera_rango:'Fuera del rango TDS',calibrando:'Calibrando',en_rango:'En rango',bajo:'Bajo',alto:'Alto',alerta:'Alerta',sin_datos:'Sin datos',sin_datos_recientes:'Sin datos recientes',sin_alertas_activas:'Alertas inactivas',lectura_invalida:'Lectura inválida',rango_inconsistente:'Revisar límites'};
 const sensorTexto = {temperatura:'DHT22 · temperatura',humedad:'DHT22 · humedad',ph:'Sonda de pH',luz:'LDR',distancia:'HC-SR04',ec:'Conductividad eléctrica',temperatura_agua:'DS18B20 · agua'};
 const formato = valor => valor === null || valor === undefined ? 'Pendiente' : Number(valor).toLocaleString('es-MX',{maximumFractionDigits:2});
 let dispositivo = '', revision = 0, puedeEditar = false, guardando = false, consultando = false, previa = null;

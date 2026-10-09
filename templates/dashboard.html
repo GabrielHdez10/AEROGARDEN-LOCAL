@@ -2,6 +2,7 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
     <title>Dashboard — AeroGarden Cloud</title>
@@ -13,6 +14,14 @@
             font-family: 'DM Sans', sans-serif;
             background-color: #f0f7f2;
             color: #1a2e22;
+        }
+
+        .nota-sensores-agua {
+            color: #526b5c;
+            font-size: 13px;
+            line-height: 1.6;
+            margin: 12px 0;
+            max-width: 850px;
         }
 
         /* Fondo SVG hidroponia */
@@ -834,6 +843,10 @@
     <h1 data-i18n="hw_titulo">Integración de Hardware</h1>
     <button onclick="abrirModal('modal-dispositivo')" data-i18n="hw_agregar_disp">+ Agregar Dispositivo</button>
     <button id="btn-agregar-sensor" onclick="abrirModal('modal-sensor')" disabled data-i18n="hw_agregar_sensor">+ Agregar Sensor</button>
+    <p class="nota-sensores-agua">
+        Para añadir la temperatura del agua y la EC, pulsa <strong>Integrar sensores de agua</strong>
+        en tu dispositivo. El TDS estimado se muestra junto a la EC.
+    </p>
     <div id="lista-hardware" style="margin-top: 20px;">
         <h3 data-i18n="hw_lista_titulo">Dispositivos y Sensores Conectados</h3>
     </div>
@@ -877,7 +890,11 @@
             </div>
         </div>
         <div style="background:white;padding:20px;border-radius:8px;">
-            <canvas id="graficaSensor"></canvas>
+            <p class="nota-sensores-agua">
+                EC y TDS proceden de la misma sonda. Las lecturas sin calibrar son provisionales;
+                los huecos en la gráfica indican lecturas no válidas.
+            </p>
+            <canvas id="graficaSensor" role="img" aria-label="Historial del sensor seleccionado"></canvas>
         </div>
     </div>
 
@@ -1398,7 +1415,7 @@
         </select>
         <div class="modal-botones">
             <button onclick="guardarDispositivo()" data-i18n="modal_guardar">Guardar</button>
-            <button onclick="cerrarModal('modal-dispositivo'" data-i18n="modal_cancelar">Cancelar</button>
+            <button onclick="cerrarModal('modal-dispositivo')" data-i18n="modal_cancelar">Cancelar</button>
         </div>
     </div>
 </div>
@@ -1411,10 +1428,11 @@
         <select id="selectDispositivoVinculado"></select>
         <label data-i18n="modal_tipo_sensor">Tipo de sensor</label>
         <select id="tipoSensor" onchange="actualizarUnidadSegunTipo()">
-            <option value="temperatura">Temperatura</option>
+            <option value="temperatura">Temperatura del aire</option>
+            <option value="temperatura_agua">Temperatura del agua (DS18B20)</option>
             <option value="humedad">Humedad</option>
             <option value="ph">pH</option>
-            <option value="ec">EC</option>
+            <option value="ec">EC estimada (módulo TDS)</option>
             <option value="co2">CO2</option>
             <option value="luz">Luz</option>
             <option value="distancia">Distancia (Ultrasónico)</option>
@@ -1428,6 +1446,8 @@
             <option value="%">% (Humedad)</option>
             <option value="pH">pH</option>
             <option value="mS/cm">mS/cm (EC)</option>
+            <option value="µS/cm">µS/cm (EC)</option>
+            <option value="uS/cm">uS/cm (EC, notación alternativa)</option>
             <option value="ppm">ppm (CO2)</option>
             <option value="lux">lux (Luz)</option>
             <option value="cm">cm (Distancia / Nivel)</option>
@@ -1449,10 +1469,11 @@
         <input type="hidden" id="editSensorIdDispositivo">
         <label data-i18n="modal_tipo_sensor">Tipo de sensor</label>
         <select id="editTipoSensor">
-            <option value="temperatura">Temperatura</option>
+            <option value="temperatura">Temperatura del aire</option>
+            <option value="temperatura_agua">Temperatura del agua (DS18B20)</option>
             <option value="humedad">Humedad</option>
             <option value="ph">pH</option>
-            <option value="ec">EC</option>
+            <option value="ec">EC estimada (módulo TDS)</option>
             <option value="co2">CO2</option>
             <option value="luz">Luz</option>
             <option value="distancia">Distancia (Ultrasónico)</option>
@@ -1466,6 +1487,8 @@
             <option value="%">% (Humedad)</option>
             <option value="pH">pH</option>
             <option value="mS/cm">mS/cm (EC)</option>
+            <option value="µS/cm">µS/cm (EC)</option>
+            <option value="uS/cm">uS/cm (EC, notación alternativa)</option>
             <option value="ppm">ppm (CO2)</option>
             <option value="lux">lux (Luz)</option>
             <option value="cm">cm (Distancia / Nivel)</option>
@@ -1790,7 +1813,7 @@ setInterval(() => {
 })();
 </script>
 <script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
-<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js', v='agua-20261006') }}"></script>
 <script>
 function cambiarIdiomaApp(lang) {
     setIdioma(lang);
@@ -1805,6 +1828,7 @@ function actualizarUnidadSegunTipo() {
     const unidad = document.getElementById('unidadMedida');
     const mapa = {
         'temperatura': '°C',
+        'temperatura_agua': '°C',
         'humedad':     '%',
         'ph':          'pH',
         'ec':          'mS/cm',

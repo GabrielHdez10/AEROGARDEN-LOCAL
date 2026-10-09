@@ -22,6 +22,13 @@
 #define PH_PIN        A0     // Sonda de pH (valor crudo, 0-1023)
 #define LUZ_PIN       A1     // LDR (valor crudo, 0-1023)
 
+// ── Sensores de agua añadidos 06/10/2026 ─────────────────────
+#define AGUA_PIN      7      // DS18B20: temperatura del agua
+#define TDS_PIN       A2     // Salida analógica del módulo TDS Meter V1.0
+#define ADC_VREF      5.0f   // Referencia ADC nominal del Mega, en voltios
+// EC y TDS se calculan desde la misma señal; requieren calibración.
+// La lógica y la calibración están en el .ino actualizado del paso 1.
+
 // ── Actuadores ──────────────────────────────────────────────
 #define RELAY_PIN     2      // Bomba de riego
 
