@@ -2361,7 +2361,7 @@ td.numero{white-space:nowrap}input[type=checkbox]{width:20px;height:20px;accent-
 <tbody id="filas"><tr><td colspan="8">Selecciona un dispositivo, un cultivo y una etapa.</td></tr></tbody>
 </table></div>
 <div class="acciones"><button id="guardar" disabled>Guardar rangos y alertas</button><span class="nota" id="permiso"></span></div>
-<p class="nota">Temperatura del aire y humedad: límites provisionales de prueba. Temperatura del agua: guía hidropónica general. La sonda de pH requiere calibración; luz y distancia requieren límites medidos en tu instalación.</p>
+<p class="nota">Temperatura del aire y humedad: límites provisionales de prueba. Temperatura del agua: referencia de estudios en aeroponía. La sonda de pH requiere calibración; luz y distancia requieren límites medidos en tu instalación.</p>
 </section>
 <section><h2>Iluminación</h2><p id="iluminacion">Selecciona un perfil para ver sus referencias.</p><p class="nota">El LDR actual entrega un índice relativo. Fotoperiodo y PPFD requieren mediciones específicas.</p></section>
 <section id="panelPrueba" hidden><h2>Resultado de la simulación</h2><p id="prueba" role="status"></p></section>
@@ -2878,6 +2878,213 @@ def preparar_bd_agua():
 
 
 _agua_instalar(globals())
+
+
+# =====================================================================
+# ACTIVIDAD 2 — CICLO DE NEBULIZACIÓN POR ETAPA + AJUSTE CLIMÁTICO
+# (10/10/2026). Se instala sobre get_relay(): el Arduino y el dashboard
+# reciben los tiempos efectivos SIN cambiar el formato de la respuesta.
+# Si algo falla, se usa el temporizador guardado (nunca rompe el riego).
+# Revisado 11/10/2026: altitud oficial de INEGI y fuentes de aeroponía
+# con su página.
+#
+# Fuentes:
+#  [Y25]   Yang, Xiao, Jiang y Luo (2025). Calculation and Prediction of
+#          Water Requirements for Aeroponic Cultivation of Crops in
+#          Greenhouses. Horticulturae 11, 1034.
+#          https://doi.org/10.3390/horticulturae11091034
+#  [H19]   Hoyos, Candelo-Becerra y Chavarria (2019). Automation of
+#          pesticide-free cilantro aeroponic crops. INGE CUC 15(1), 123-132.
+#          https://doi.org/10.17981/ingecuc.15.1.2019.11
+#  [R22]   Rincón, Candelo-Becerra y Hoyos (2022). Modelling of phosphorus
+#          accumulation in an aeroponic coriander crop. Int J Agric & Biol
+#          Eng 15(6), 73-79. https://doi.org/10.25165/j.ijabe.20221506.6760
+#  [G26]   Gong et al. (2026). Multi-Temporal Spectral Characteristics of
+#          Evapotranspiration... Agronomy 16, 1040.
+#  [B24]   Evaluating Evapotranspiration in a Commercial Greenhouse...
+#          bioRxiv, doi 10.1101/2024.01.11.575151 (2024).
+#  [FAO56] Allen et al. (1998), Irrigation and Drainage Paper 56,
+#          citado por Y25 (ref. 22) y G26 (ref. 28).
+#  [INEGI] INEGI (2018). Anuario estadístico y geográfico de Veracruz,
+#          cuadro 1.2: altitud de las cabeceras municipales.
+# =====================================================================
+import time
+
+# [Y25] §2.4, p. 5: intervalos de nebulización por etapa, (ON s, OFF s).
+# Los autores los fijaron con ensayos preliminares de cilantro aeropónico.
+CICLO_ETAPA_Y25 = {
+    'inicial':    (60, 600),   # 1 min ON / 10 min OFF
+    'desarrollo': (60, 300),   # 1 min ON /  5 min OFF
+    'media':      (120, 300),  # 2 min ON /  5 min OFF
+    'final':      (60, 300),   # 1 min ON /  5 min OFF
+}
+# [Y25] solo trabajó con cilantro. Ninguna fuente del proyecto reporta
+# un ciclo para perejil: con perfil 'perejil' se conserva el temporizador.
+CULTIVOS_CICLO_Y25 = ('cilantro', 'compartido')
+
+# [H19] §II.C, p. 125: 20 s ON / 160 s OFF durante todo el cultivo, en
+# Medellín (1 479-1 900 msnm, clima subtropical estable todo el año).
+# [R22] §3.1, p. 74: el mismo ciclo sostuvo 42 días de cilantro en el
+# invernadero de 1 479 msnm; p. 77: hasta 5 h sin riego estresan la planta.
+# Es el apagado más corto validado en las fuentes: piso del ajuste climático.
+OFF_MINIMO_H19 = 160
+
+# [Y25] §2.5, p. 6 (Figs. 2-4): clima medio del invernadero en que se validaron
+# los ciclos: 11.5 °C, 77.7 % HR y 0.1017 MPa (= 101.7 kPa).
+CLIMA_REF_Y25 = (11.5, 77.7, 101.7)
+
+# Altitud del módulo: Xalapa-Enríquez, 1 392 msnm [INEGI]. Solo afecta a γ
+# ([FAO56] ec. 7-8). Se puede cambiar con ALTITUD_M en el .env.
+ALTITUD_M = float(os.environ.get('ALTITUD_M', '1392'))
+
+# [G26]: Rn y DPV dominan la ET a escala diaria. [B24]: con valores
+# momentáneos la estimación empeora por histéresis; la diaria es mejor.
+# Por eso el ajuste usa el promedio de las últimas 24 h, no la lectura actual.
+VENTANA_CLIMA_H = 24
+# Criterio de ingeniería (sin fuente): las lecturas deben cubrir al menos
+# 12 h de la ventana para que el promedio incluya día y noche.
+COBERTURA_MIN_H = 12
+CACHE_CICLO_S = 600            # el ajuste es diario: recalcular cada 10 min basta
+AJUSTE_CLIMA_ACTIVO = os.environ.get('AJUSTE_CLIMA', '1') != '0'
+
+
+def presion_por_altitud_kpa(z_m):
+    """[FAO56] ec. 7."""
+    return 101.3 * ((293.0 - 0.0065 * z_m) / 293.0) ** 5.26
+
+
+def demanda_aerodinamica(t, hr, p_kpa):
+    """Término aerodinámico de la ec. 7 de [Y25] (Penman-Monteith revisada
+    para viento ~0 dentro del invernadero). Devuelve (término, DPV en kPa).
+    SUPUESTO: se omite el término de radiación porque el módulo no mide
+    radiación neta (el LDR no es un radiómetro). Solo se usa como razón
+    entre el clima actual y el del ensayo de Y25."""
+    es = 0.6108 * math.exp(17.27 * t / (t + 237.3))   # [FAO56] ec. 11 / [G26] ec. 1
+    ea = es * hr / 100.0                              # [G26] ec. 2
+    dpv = max(0.0, es - ea)                           # [G26] ec. 3
+    delta = 4098.0 * es / (t + 237.3) ** 2            # [FAO56] ec. 13
+    gamma = 0.000665 * p_kpa                          # [FAO56] ec. 8
+    return gamma * 1713.0 * dpv / (t + 273.0) / (delta + 1.64 * gamma), dpv
+
+
+DEMANDA_REF_Y25 = demanda_aerodinamica(*CLIMA_REF_Y25)[0]
+
+
+def clima_ultimas_24h(cursor, device_id):
+    """Promedios de temperatura y HR del DHT22 en la ventana diaria.
+    Descarta lecturas físicamente imposibles. None si no hay cobertura."""
+    cursor.execute("""
+        SELECT LOWER(TRIM(s.tipo_sensor)) AS tipo, COUNT(*) AS n, AVG(r.valor) AS media,
+               TIMESTAMPDIFF(MINUTE, MIN(r.fecha_hora), MAX(r.fecha_hora)) AS minutos
+        FROM sensores s JOIN registro_sensores r ON r.idSensor = s.idSensore
+        WHERE s.idDispositivo = %s
+          AND r.fecha_hora >= NOW() - INTERVAL %s HOUR
+          AND ((LOWER(TRIM(s.tipo_sensor)) = 'temperatura' AND r.valor BETWEEN -10 AND 60)
+            OR (LOWER(TRIM(s.tipo_sensor)) = 'humedad' AND r.valor BETWEEN 1 AND 100))
+        GROUP BY LOWER(TRIM(s.tipo_sensor))
+    """, (device_id, VENTANA_CLIMA_H))
+    filas = {f['tipo']: f for f in cursor.fetchall()}
+    t, h = filas.get('temperatura'), filas.get('humedad')
+    if not t or not h:
+        return None
+    if min(t['minutos'] or 0, h['minutos'] or 0) < COBERTURA_MIN_H * 60:
+        return None
+    return {'temperatura': round(float(t['media']), 2), 'humedad': round(float(h['media']), 2),
+            'lecturas': int(min(t['n'], h['n'])),
+            'horas_cubiertas': round(min(t['minutos'], h['minutos']) / 60.0, 1)}
+
+
+def calcular_ciclo(etapa, clima):
+    """Ciclo [Y25] de la etapa, con el OFF ajustado a la demanda del clima.
+    factor = demanda del ensayo / demanda actual, nunca mayor que 1:
+    el apagado solo se ACORTA (nunca se deja la raíz más tiempo sin
+    niebla que en el ensayo validado) y nunca baja de 160 s [H19]."""
+    on, off_base = CICLO_ETAPA_Y25[etapa]
+    detalle = {'tiempo_on': on, 'tiempo_off_base': off_base, 'factor_clima': 1.0,
+               'clima_24h': clima, 'ajuste': 'sin_ajuste'}
+    off = off_base
+    if clima:
+        demanda, dpv = demanda_aerodinamica(clima['temperatura'], clima['humedad'],
+                                            presion_por_altitud_kpa(ALTITUD_M))
+        clima['dpv_kpa'] = round(dpv, 3)
+        if demanda > 0:
+            factor = min(1.0, DEMANDA_REF_Y25 / demanda)
+            off = max(min(OFF_MINIMO_H19, off_base), int(round(off_base * factor)))
+            detalle.update(factor_clima=round(factor, 3),
+                           ajuste='piso_H19' if off == OFF_MINIMO_H19 and off_base * factor < OFF_MINIMO_H19
+                           else ('demanda_mayor' if factor < 1 else 'igual_o_menor_que_Y25'))
+    detalle['tiempo_off'] = off
+    return detalle
+
+
+_ciclo_cache = {}
+_ciclo_lock = threading.Lock()
+
+
+def ciclo_riego_efectivo(device_id):
+    """Ciclo por etapa del dispositivo, o None si su perfil no tiene uno
+    documentado (sin perfil, etapa 'general' o cultivo 'perejil')."""
+    ahora = time.monotonic()
+    with _ciclo_lock:
+        guardado = _ciclo_cache.get(device_id)
+        if guardado and ahora - guardado[0] < CACHE_CICLO_S:
+            return guardado[1]
+    with sesion_rangos() as (_, cursor):
+        perfil = leer_perfil(cursor, device_id)
+        if (not perfil or perfil['cultivo'] not in CULTIVOS_CICLO_Y25
+                or perfil['etapa'] not in CICLO_ETAPA_Y25):
+            resultado = None
+        else:
+            clima = clima_ultimas_24h(cursor, device_id) if AJUSTE_CLIMA_ACTIVO else None
+            resultado = dict(calcular_ciclo(perfil['etapa'], clima),
+                             cultivo=perfil['cultivo'], etapa=perfil['etapa'])
+    with _ciclo_lock:
+        _ciclo_cache[device_id] = (ahora, resultado)
+    return resultado
+
+
+def _riego_instalar(n):
+    original_get_relay = n['get_relay']
+
+    def get_relay(device_id):
+        config = original_get_relay(device_id)
+        try:
+            ciclo = ciclo_riego_efectivo(int(device_id))
+        except Exception:
+            app.logger.exception('Ciclo por etapa no disponible; se usa el temporizador guardado')
+            ciclo = None
+        if ciclo:
+            # Solo cambian los valores: el JSON que recibe el Mega conserva sus 4 claves.
+            config['tiempo_on'], config['tiempo_off'] = ciclo['tiempo_on'], ciclo['tiempo_off']
+        return config
+    n['get_relay'] = get_relay
+
+    @app.route('/api/riego/ciclo/<int:device_id>')
+    @login_requerido
+    def ver_ciclo_riego(device_id):
+        try:
+            with sesion_rangos() as (_, cursor):
+                if not permiso_rangos(cursor, device_id, get_id_usuario()):
+                    return jsonify(error='Dispositivo no encontrado o sin permiso.'), 403
+            with _ciclo_lock:
+                _ciclo_cache.pop(device_id, None)      # al consultarlo, recalcular
+            ciclo = ciclo_riego_efectivo(device_id)
+        except Exception:
+            app.logger.exception('Error calculando el ciclo de riego')
+            return jsonify(error='No se pudo calcular el ciclo. Revisa la conexion con MySQL.'), 500
+        if not ciclo:
+            return jsonify(origen='temporizador',
+                           motivo='El perfil del dispositivo no tiene ciclo documentado '
+                                  '(sin perfil, etapa general o cultivo perejil).')
+        return jsonify(dict(ciclo, origen='etapa', altitud_m=ALTITUD_M,
+                            fuentes={'ciclo_por_etapa': 'Yang et al. 2025, Horticulturae 11:1034, sec. 2.4, p. 5',
+                                     'piso_off': 'Hoyos et al. 2019, INGE CUC 15(1), p. 125; Rincon et al. 2022, IJABE 15(6), p. 74',
+                                     'demanda': 'Yang et al. 2025, ec. 7 (termino aerodinamico)',
+                                     'escala_diaria': 'Gong et al. 2026; bioRxiv 10.1101/2024.01.11.575151',
+                                     'altitud': 'INEGI 2018, cuadro 1.2: Xalapa-Enriquez, 1392 msnm'}))
+
+
+_riego_instalar(globals())
 
 
 if __name__ == '__main__':
