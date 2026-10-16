@@ -1,5 +1,7 @@
 // AEROGARDEN: paso 1, DS18B20 y TDS dentro de este mismo archivo.
 // ============================================================
+// AJUSTE BOMBA 16/10/2026: consulta de configuración al arrancar y
+// diagnóstico de órdenes rechazadas. Se conserva la lógica de riego.
 // VERSIÓN 09/10/2026 — FIX comunicación Mega <-> ESP8266
 //  - enviarDatos(): el POST se armaba con serializeJson() sobre un
 //    String que ya traía "POST:/api/arduino/datos:". ArduinoJson 7
@@ -424,49 +426,129 @@ void pedirConfig() {
         Serial.println(respuesta);
     }
     StaticJsonDocument<768> doc;
-    if(deserializeJson(doc,respuesta))return;
+    if(respuesta.length()==0){
+        imprimirSeguro(F("Bomba: sin respuesta de configuracion. Se conserva el estado de control anterior."));
+        return;
+    }
+    DeserializationError error=deserializeJson(doc,respuesta);
+    if(error){
+        imprimirSeguro(String(F("Bomba: configuracion JSON no valida: "))+error.c_str());
+        return;
+    }
     JsonObject r=doc["relay"];
-    if(!r["tiempo_on"].is<int>() || !r["tiempo_off"].is<int>())return;
+    if(r.isNull()){
+        imprimirSeguro(F("Bomba: respuesta sin configuracion relay."));
+        if(doc["error"].is<const char*>())
+            imprimirSeguro(String(F("Bomba: error del servidor/puente: "))+doc["error"].as<String>());
+        return;
+    }
+    if(!r["tiempo_on"].is<int>() || !r["tiempo_off"].is<int>()){
+        imprimirSeguro(F("Bomba: tiempo_on y tiempo_off deben ser enteros. Orden rechazada."));
+        return;
+    }
     int on=r["tiempo_on"],off=r["tiempo_off"];
     const char *modo=r["modo"]|"", *estado=r["estado_manual"]|"";
-    if(on<1 || on>3600 || off<1 || off>3600 ||
-       (strcmp(modo,"manual") && strcmp(modo,"automatico")) ||
-       (strcmp(estado,"encendido") && strcmp(estado,"apagado")))return;
+    if(on<1 || on>3600 || off<1 || off>3600){
+        imprimirSeguro(F("Bomba: tiempos fuera de 1 a 3600 segundos. Orden rechazada."));
+        return;
+    }
+    if(strcmp(modo,"manual") && strcmp(modo,"automatico")){
+        imprimirSeguro(F("Bomba: modo no valido. Debe ser manual o automatico."));
+        return;
+    }
+    if(strcmp(estado,"encendido") && strcmp(estado,"apagado")){
+        imprimirSeguro(F("Bomba: estado_manual no valido. Debe ser encendido o apagado."));
+        return;
+    }
     bool nuevoManual=strcmp(modo,"manual")==0;
+    bool cambioConfig=!configRecibida || nuevoManual!=modoManual ||
+        (strcmp(estado,"encendido")==0)!=estadoManual || on!=tiempoOn || off!=tiempoOff;
     if(!configRecibida || nuevoManual!=modoManual){
         tCambioRelay=millis();bombaEncendida=false;digitalWrite(RELAY_PIN,RELAY_OFF);
     }
     tiempoOn=on;tiempoOff=off;modoManual=nuevoManual;estadoManual=strcmp(estado,"encendido")==0;
     configRecibida=true;controlarRelay();
+    if(cambioConfig){
+        imprimirSeguro(String(F("Bomba: config aceptada, modo="))+modo+
+            F(", estado_manual=")+estado+F(", ON=")+String(tiempoOn)+
+            F(" s, OFF=")+String(tiempoOff)+F(" s"));
+    }
 }
 
 // ================================================================
 // CONTROL RELAY
+// VERSIÓN 16/10/2026 — app.py decide, el Mega ejecuta
+//  - Sin decisión de app.py (aún no llega una config válida o no hay
+//    device_id) la bomba queda en OFF: el Mega no decide por su cuenta.
+//  - Al llegar la decisión de app.py en automático (primera config o
+//    cambio de manual a automático) la bomba arranca REGANDO y luego
+//    alterna con tiempo_on / tiempo_off de app.py. Antes arrancaba con
+//    la fase apagada: con el ciclo por etapa (5-10 min OFF) parecía
+//    que la bomba no encendía.
+//  - Manual: ejecuta estado_manual de app.py, igual que antes.
+//  - Calibración de EC: OFF, y al salir reinicia la fase apagada,
+//    igual que antes.
+//  - Cada cambio se avisa por el monitor serie solo con el buffer USB
+//    vacío, para no bloquear la lectura de la respuesta del ESP8266.
 // ================================================================
 void controlarRelay() {
+    // modo: 0 calibración, 1 esperando a app.py, 2 manual, 3 automático
+    static uint8_t modoPrevio = 1;
+    static uint8_t avisado = 0xFF;              // último estado impreso
+    static int onAvisado = -1, offAvisado = -1;
+    unsigned long ahora = millis();
+
+    // Al entrar o salir de calibración se reinicia la fase (igual que antes).
     if (agua.calibrando != calibrandoAnterior) {
-        calibrandoAnterior=agua.calibrando;tCambioRelay=millis();
+        calibrandoAnterior = agua.calibrando;
+        tCambioRelay = ahora;
     }
-    if (!configRecibida || deviceId<=0 || agua.calibrando) {
-        bombaEncendida=false;digitalWrite(RELAY_PIN,RELAY_OFF);return;
+
+    uint8_t modo;
+    if (agua.calibrando)                        modo = 0;
+    else if (!configRecibida || deviceId <= 0)  modo = 1;
+    else if (modoManual)                        modo = 2;
+    else                                        modo = 3;
+
+    if (modo <= 1) {
+        bombaEncendida = false;                 // calibrando o sin decisión de app.py
+    } else if (modo == 2) {
+        bombaEncendida = estadoManual;          // lo que ordena app.py
+    } else if (modoPrevio == 1 || modoPrevio == 2) {
+        bombaEncendida = true;                  // llegó la decisión de app.py: regar ya
+        tCambioRelay = ahora;
+    } else {
+        unsigned long fase = (unsigned long)(bombaEncendida ? tiempoOn : tiempoOff) * 1000UL;
+        if (ahora - tCambioRelay >= fase) {     // alterna con los tiempos de app.py
+            bombaEncendida = !bombaEncendida;
+            tCambioRelay = ahora;
+        }
     }
-    if (modoManual) {
-        digitalWrite(RELAY_PIN, estadoManual ? RELAY_ON : RELAY_OFF);
-        bombaEncendida = estadoManual;
+    modoPrevio = modo;
+    digitalWrite(RELAY_PIN, bombaEncendida ? RELAY_ON : RELAY_OFF);
+
+    // Aviso por monitor serie: solo si algo cambió y el buffer USB está
+    // vacío; si no, se reintenta en la siguiente llamada.
+    uint8_t estado = modo * 2 + (bombaEncendida ? 1 : 0);
+    bool cambio = estado != avisado ||
+                  (modo == 3 && (tiempoOn != onAvisado || tiempoOff != offAvisado));
+    if (!cambio || Serial.availableForWrite() < SERIAL_TX_BUFFER_SIZE - 1) return;
+    avisado = estado; onAvisado = tiempoOn; offAvisado = tiempoOff;
+
+    Serial.print(bombaEncendida ? F("Bomba ON") : F("Bomba OFF"));
+    if (modo == 0) { Serial.println(F(" (calibracion EC)")); return; }
+    if (modo == 1) {
+        Serial.println(deviceId <= 0 ? F(": sin device_id valido")
+                                     : F(": esperando config valida de app.py"));
         return;
     }
-    unsigned long ahora = millis();
-    if (bombaEncendida && ahora - tCambioRelay >= (unsigned long)tiempoOn * 1000UL) {
-        bombaEncendida = false;
-        digitalWrite(RELAY_PIN, RELAY_OFF);
-        tCambioRelay = ahora;
-        Serial.println(F("Bomba OFF (auto)"));
-    } else if (!bombaEncendida && ahora - tCambioRelay >= (unsigned long)tiempoOff * 1000UL) {
-        bombaEncendida = true;
-        digitalWrite(RELAY_PIN, RELAY_ON);
-        tCambioRelay = ahora;
-        Serial.println(F("Bomba ON (auto)"));
-    }
+    if (modo == 2) { Serial.println(F(" (manual, app.py)")); return; }
+    unsigned long dur = bombaEncendida ? tiempoOn : tiempoOff;
+    unsigned long pasados = (ahora - tCambioRelay) / 1000UL;
+    Serial.print(bombaEncendida ? F(" (auto, app.py): se apaga en ")
+                                : F(" (auto, app.py): enciende en "));
+    Serial.print(dur > pasados ? dur - pasados : 0UL);
+    Serial.println(F(" s"));
 }
 
 // ================================================================
@@ -526,6 +608,10 @@ void setup() {
             Serial.println(F("ERROR: no se pudo emparejar. Verifica el PAIRING_CODE."));
         }
     }
+
+    // Consultar la orden de la bomba antes del primer envio de sensores.
+    // Si falla, pedirConfig conserva el control anterior y loop reintenta.
+    if (deviceId > 0) pedirConfig();
 
     // Que el primer envio ocurra ya, sin esperar los 10 s del intervalo
     ultimoCiclo = millis() - INTERVALO_DATOS;
