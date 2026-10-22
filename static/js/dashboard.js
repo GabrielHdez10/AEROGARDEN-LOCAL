@@ -267,44 +267,121 @@ function confirmar(mensaje) {
     });
 }
 let dispositivoActualId = null;
-let dispositivosGlobal  = [];
-async function cargarDispositivosGlobal() {
-    try {
-        const res = await fetch('/api/dispositivos/lista');
-        dispositivosGlobal = await res.json();
-        if (dispositivosGlobal.length > 0) {
-            const ids = dispositivosGlobal.map(d => d.idDispositivo);
-            if (!dispositivoActualId || !ids.includes(dispositivoActualId)) {
-                dispositivoActualId = dispositivosGlobal[0].idDispositivo;
-            }
-        }
-        _llenarSelectoresDispositivo();
-    } catch(e) { console.error('Error cargando dispositivos globales:', e); }
+let dispositivosGlobal = [];
+let revisionDispositivosGlobal = 0;
+
+function hayOrdenBombaPendiente() {
+    return typeof bombaSolicitudActiva !== 'undefined' && bombaSolicitudActiva;
 }
 
-function _llenarSelectoresDispositivo() {
-    ['select-wifi-dispositivo', 'select-bomba-dispositivo'].forEach(id => {
-        const sel = document.getElementById(id);
-        if (!sel) return;
-        sel.innerHTML = dispositivosGlobal.map(d =>
-            `<option value="${d.idDispositivo}">${d.nombre}</option>`
-        ).join('');
-        if (dispositivoActualId) sel.value = dispositivoActualId;
-    });
+function sincronizarSelectoresControl() {
+    for (const id of ['select-wifi-dispositivo', 'select-bomba-dispositivo']) {
+        const selector = document.getElementById(id);
+        if (selector) selector.value = dispositivoActualId ? String(dispositivoActualId) : '';
+    }
+}
+
+function invalidarBombaAlCambiarDispositivo() {
+    if (typeof ID_SENSOR_NIVEL !== 'undefined') ID_SENSOR_NIVEL = null;
+    if (typeof bombaConfigConfirmada !== 'undefined') bombaConfigConfirmada = null;
+    if (typeof bombaRevisionCarga !== 'undefined') ++bombaRevisionCarga;
+    if (typeof actualizarIndicadorBomba === 'function') actualizarIndicadorBomba(null, null);
+    if (typeof bombaPintarInicio === 'function') bombaPintarInicio(null);
+    for (const id of ['input-tiempo-on', 'input-tiempo-off']) {
+        const campo = document.getElementById(id);
+        if (campo) campo.value = '';
+    }
+    const detalle = document.getElementById('detalle-config-bomba');
+    if (detalle) detalle.textContent = 'Consulta la configuración del dispositivo seleccionado.';
+    if (typeof actualizarPreviewBomba === 'function') actualizarPreviewBomba();
+}
+
+async function cargarDispositivosGlobal() {
+    if (hayOrdenBombaPendiente()) return false;
+    const revision = ++revisionDispositivosGlobal;
+    try {
+        const datos = await pedirDatosSensor('/api/dispositivos/lista', {cache: 'no-store'});
+        if (revision !== revisionDispositivosGlobal || hayOrdenBombaPendiente()) return false;
+        if (!Array.isArray(datos)) throw new Error('La lista de dispositivos no tiene un formato válido.');
+        const ids = new Set();
+        const nuevos = datos.map(dispositivo => {
+            const idOriginal = dispositivo?.idDispositivo;
+            const id = Number(idOriginal);
+            if (!['number', 'string'].includes(typeof idOriginal) || !/^\d+$/.test(String(idOriginal)) ||
+                !Number.isInteger(id) || id < 1 || id > 2147483647 || ids.has(id)) {
+                throw new Error('La lista contiene un identificador de dispositivo inválido o repetido.');
+            }
+            ids.add(id);
+            return {...dispositivo, idDispositivo: id};
+        });
+        const anterior = dispositivoActualId;
+        dispositivosGlobal = nuevos;
+        dispositivoActualId = ids.has(Number(anterior)) ? Number(anterior) : (nuevos[0]?.idDispositivo ?? null);
+        if (anterior !== dispositivoActualId) invalidarBombaAlCambiarDispositivo();
+        _llenarSelectoresDispositivo();
+        return true;
+    } catch (error) {
+        if (revision === revisionDispositivosGlobal && !hayOrdenBombaPendiente()) {
+            dispositivosGlobal = [];
+            dispositivoActualId = null;
+            invalidarBombaAlCambiarDispositivo();
+            _llenarSelectoresDispositivo('No se pudieron cargar los dispositivos');
+            if (typeof bombaMostrarMensaje === 'function') {
+                bombaMostrarMensaje('No se pudieron cargar los dispositivos. Revisa la conexión y vuelve a consultar.', true);
+            }
+            console.error('Error cargando dispositivos globales:', error);
+        }
+        return false;
+    }
+}
+
+function _llenarSelectoresDispositivo(mensajeVacio = 'Sin dispositivos disponibles') {
+    for (const id of ['select-wifi-dispositivo', 'select-bomba-dispositivo']) {
+        const selector = document.getElementById(id);
+        if (!selector) continue;
+        // Los nombres son texto; nunca se interpretan como etiquetas HTML.
+        const opciones = dispositivosGlobal.map(dispositivo => new Option(
+            String(dispositivo.nombre ?? ('Dispositivo ' + dispositivo.idDispositivo)),
+            String(dispositivo.idDispositivo)
+        ));
+        if (!opciones.length) opciones.push(new Option(mensajeVacio, ''));
+        selector.replaceChildren(...opciones);
+    }
+    sincronizarSelectoresControl();
+}
+
+function seleccionarDispositivoControl(idSelector) {
+    const selector = document.getElementById(idSelector);
+    if (!selector) return false;
+    if (hayOrdenBombaPendiente()) {
+        sincronizarSelectoresControl();
+        if (typeof bombaMostrarMensaje === 'function') bombaMostrarMensaje('Espera a que termine la orden de la bomba antes de cambiar de dispositivo.');
+        return false;
+    }
+    const id = Number(selector.value);
+    if (!Number.isInteger(id) || !dispositivosGlobal.some(dispositivo => dispositivo.idDispositivo === id)) {
+        sincronizarSelectoresControl();
+        if (typeof bombaMostrarMensaje === 'function') bombaMostrarMensaje('Selecciona un dispositivo disponible en la lista.', true);
+        return false;
+    }
+    if (id !== dispositivoActualId) {
+        dispositivoActualId = id;
+        invalidarBombaAlCambiarDispositivo();
+    }
+    sincronizarSelectoresControl();
+    return true;
 }
 
 function cambiarDispositivoWifi() {
-    const sel = document.getElementById('select-wifi-dispositivo');
-    if (sel) dispositivoActualId = parseInt(sel.value);
-    cargarRedActual();
+    if (!seleccionarDispositivoControl('select-wifi-dispositivo')) return false;
+    return cargarRedActual();
 }
 
 function cambiarDispositivoBomba() {
-    const sel = document.getElementById('select-bomba-dispositivo');
-    if (sel) dispositivoActualId = parseInt(sel.value);
-    if (typeof ID_SENSOR_NIVEL !== 'undefined') ID_SENSOR_NIVEL = null;
-    cargarSeccionRelevador();
+    if (!seleccionarDispositivoControl('select-bomba-dispositivo')) return false;
+    return cargarSeccionRelevador();
 }
+
 function mostrarSeccion(idSeccion) {
     const elementos = document.querySelectorAll('.seccion, #dashboard-contenido');
     elementos.forEach(s => { s.style.display = 'none'; });
@@ -2071,37 +2148,8 @@ async function _panelCultivos() {
     }
 }
 
-async function _panelBomba() {
-    const cont = document.getElementById('inicio-bomba');
-    if (!cont) return;
-    try {
-        const did = dispositivoActualId || '';
-        const res  = await fetch('/api/relevador/estado' + (did ? '?device_id=' + did : ''));
-        const data = await res.json();
-        const modo     = data.modo || 'automatico';
-        const manual   = data.estado_manual || 'apagado';
-        const encendida = modo === 'manual' && manual === 'encendido';
-        cont.innerHTML = `
-            <div class="bomba-mini">
-                <div class="bomba-dot ${encendida ? 'bomba-dot-on' : 'bomba-dot-off'}"></div>
-                <div>
-                    <div style="font-weight:700;font-size:15px;color:#2c3e50;">
-                        ${encendida ? t('bomba_encendida') : t('bomba_apagada')}
-                    </div>
-                    <div style="font-size:12px;color:#aaa;margin-top:2px;">
-                        Modo: ${modo === 'automatico' ? t('bomba_modo_auto').replace('Automático (temporizador)','Automático') : t('bomba_modo_manual')} ·
-                        ON ${data.tiempo_on || 30}s / OFF ${data.tiempo_off || 60}s
-                    </div>
-                </div>
-            </div>
-            <div style="padding:0 16px 14px;display:flex;gap:8px;">
-                <button class="btn-verde btn-sm" onclick="controlManualBomba('encendido'); setTimeout(_panelBomba, 800)">${t('bomba_encender_corto')}</button>
-                <button class="btn-rojo btn-sm"  onclick="controlManualBomba('apagado');  setTimeout(_panelBomba, 800)">${t('bomba_apagar_corto')}</button>
-            </div>`;
-    } catch (e) {
-        cont.innerHTML = '<div class="inicio-vacio" style="color:#e74c3c;">Error al cargar estado.</div>';
-    }
-}
+// El panel de la bomba utiliza _panelBomba(), definido en dashboard.html revisado.
+// Así hay una sola implementación para confirmar órdenes y mostrar la configuración.
 
 document.addEventListener("DOMContentLoaded", async () => {
     await cargarDispositivosGlobal();
@@ -2116,78 +2164,26 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 
-async function cargarSeccionRelevador() {
-    if (!dispositivoActualId) await cargarDispositivosGlobal();
-    if (!dispositivoActualId) return;
-    try {
-        const res  = await fetch('/api/relevador/config?device_id=' + dispositivoActualId);
-        const data = await res.json();
-        const modo    = document.getElementById('modoRelevador');
-        const tOn     = document.getElementById('tiempoOn');
-        const tOff    = document.getElementById('tiempoOff');
-        const estadoM = document.getElementById('estadoManual');
-        if (modo)    modo.value    = data.modo          || 'automatico';
-        if (tOn)     tOn.value     = data.tiempo_on     ?? 30;
-        if (tOff)    tOff.value    = data.tiempo_off    ?? 60;
-        if (estadoM) estadoM.value = data.estado_manual || 'apagado';
-        actualizarVistaRelevador(data);
-    } catch (e) { console.error('Error cargando relevador:', e); }
+// Compatibilidad con llamadas antiguas: se delega en el controlador único del HTML.
+// Requiere dashboard.html revisado el 21/10/2026 y el app.py con config_guardada.
+function guardarConfigRelevador() {
+    if (typeof bombaEnviarConfiguracion !== 'function') {
+        toast('Instala también el dashboard.html revisado para usar el control de la bomba.', 'warning');
+        return Promise.resolve(false);
+    }
+    return guardarConfigBomba();
 }
 
 function actualizarVistaRelevador(data) {
-    const modo      = data.modo          || 'automatico';
-    const manual    = data.estado_manual || 'apagado';
-    const encendida = modo === 'manual' && manual === 'encendido';
-    const dot  = document.getElementById('bomba-estado-dot');
-    const txt  = document.getElementById('bomba-estado-texto');
-    const secM = document.getElementById('seccion-manual-relay');
-    if (dot)  dot.style.background = encendida ? '#27ae60' : '#e74c3c';
-    if (txt)  txt.textContent = encendida ? t('bomba_encendida') : t('bomba_apagada');
-    if (secM) secM.style.display = modo === 'manual' ? 'block' : 'none';
-}
-
-async function guardarConfigRelevador() {
-    if (!dispositivoActualId) { toast('Selecciona un dispositivo primero', 'warning'); return; }
-    const data = {
-        device_id:     dispositivoActualId,
-        modo:          document.getElementById('modoRelevador')?.value  || 'automatico',
-        tiempo_on:     parseInt(document.getElementById('tiempoOn')?.value  || 30),
-        tiempo_off:    parseInt(document.getElementById('tiempoOff')?.value || 60),
-        estado_manual: document.getElementById('estadoManual')?.value || 'apagado'
-    };
+    if (typeof bombaValidarConfig !== 'function' || typeof actualizarIndicadorBomba !== 'function') return false;
     try {
-        const res = await fetch('/api/relevador/config', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-        });
-        const result = await res.json();
-        if (res.ok) {
-            toast('✅ Configuración del relevador guardada', 'success');
-            actualizarVistaRelevador(result.config || data);
-        } else { toast('Error: ' + (result.error || 'No se pudo guardar'), 'error'); }
-    } catch (e) { toast('Error de conexión', 'error'); }
-}
-
-async function controlManualBomba(estado) {
-    if (!dispositivoActualId) { toast('Selecciona un dispositivo primero', 'warning'); return; }
-    try {
-        const res = await fetch('/api/relevador/config', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                device_id:     dispositivoActualId,
-                modo:          'manual',
-                estado_manual: estado,
-                tiempo_on:     parseInt(document.getElementById('tiempoOn')?.value  || 30),
-                tiempo_off:    parseInt(document.getElementById('tiempoOff')?.value || 60)
-            })
-        });
-        const result = await res.json();
-        if (res.ok) {
-            toast(estado === 'encendido' ? t('bomba_encendida') : t('bomba_apagada'),
-                  estado === 'encendido' ? 'success' : 'warning');
-            actualizarVistaRelevador(result.config || { modo: 'manual', estado_manual: estado });
-        } else { toast('Error al controlar la bomba', 'error'); }
-    } catch (e) { toast('Error de conexión', 'error'); }
+        const config = bombaValidarConfig(data);
+        actualizarIndicadorBomba(config.modo, config.estado_manual);
+        return true;
+    } catch (error) {
+        if (typeof bombaMostrarMensaje === 'function') bombaMostrarMensaje(error.message, true);
+        return false;
+    }
 }
 
 

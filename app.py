@@ -221,15 +221,61 @@ def get_relay(device_id: int) -> dict:
     return config.copy()
 
 
-def set_relay(device_id: int, data: dict):
+# Validacion y guardado de la configuracion de riego - 21/10/2026.
+# Estos limites coinciden con los que acepta el Mega; no son rangos agronomicos.
+def _relay_validar_entero(valor, nombre, minimo=1, maximo=3600):
+    """Acepta enteros y cadenas de enteros, sin truncar decimales ni booleanos."""
+    if type(valor) is int:
+        numero = valor
+    elif isinstance(valor, str):
+        texto = valor.strip()
+        if not texto or not texto.isascii() or not texto.isdigit():
+            raise ValueError(f"{nombre} debe ser un numero entero.")
+        numero = int(texto)
+    else:
+        raise ValueError(f"{nombre} debe ser un numero entero.")
+    if not minimo <= numero <= maximo:
+        raise ValueError(f"{nombre} debe estar entre {minimo} y {maximo}.")
+    return numero
+
+
+def _relay_validar_config(data):
+    """Valida las cuatro claves actuales y conserva los valores predeterminados."""
+    if not isinstance(data, dict):
+        raise ValueError("Envia un objeto JSON con la configuracion de la bomba.")
+    predeterminada = _relay_default()
     config = {
-        "tiempo_on":     int(data.get("tiempo_on",     30)),
-        "tiempo_off":    int(data.get("tiempo_off",    60)),
-        "modo":          data.get("modo",          "automatico"),
-        "estado_manual": data.get("estado_manual", "apagado"),
+        "tiempo_on": _relay_validar_entero(
+            data.get("tiempo_on", predeterminada["tiempo_on"]), "tiempo_on"),
+        "tiempo_off": _relay_validar_entero(
+            data.get("tiempo_off", predeterminada["tiempo_off"]), "tiempo_off"),
+        "modo": data.get("modo", predeterminada["modo"]),
+        "estado_manual": data.get("estado_manual", predeterminada["estado_manual"]),
     }
+    if config["modo"] not in ("manual", "automatico"):
+        raise ValueError("modo debe ser 'manual' o 'automatico'.")
+    if config["estado_manual"] not in ("encendido", "apagado"):
+        raise ValueError("estado_manual debe ser 'encendido' o 'apagado'.")
+    return config
+
+
+def _relay_cerrar_recursos(cursor, conexion):
+    """Intenta cerrar ambos recursos, incluso si el cierre del primero falla."""
+    for nombre, recurso in (("cursor", cursor), ("conexion", conexion)):
+        if recurso is not None:
+            try:
+                recurso.close()
+            except Exception:
+                # Un fallo de cierre posterior a commit no deshace un guardado confirmado.
+                app.logger.warning("No se pudo cerrar %s del relevador", nombre, exc_info=True)
+
+
+def set_relay(device_id: int, data: dict):
+    device_id = _relay_validar_entero(device_id, "device_id", maximo=2147483647)
+    config = _relay_validar_config(data)
+    cx = cur = None
     try:
-        cx  = conectar_bd()
+        cx = conectar_bd()
         cur = cx.cursor()
         cur.execute("""
             INSERT INTO config_relay (idDispositivo, tiempo_on, tiempo_off, modo, estado_manual)
@@ -242,11 +288,20 @@ def set_relay(device_id: int, data: dict):
         """, (device_id, config["tiempo_on"], config["tiempo_off"],
               config["modo"], config["estado_manual"]))
         cx.commit()
-        cur.close(); cx.close()
-    except Exception as e:
-        print(f"[RELAY set_relay] Error BD: {e}")
+    except Exception:
+        if cx is not None:
+            try:
+                cx.rollback()
+            except Exception:
+                app.logger.warning("No se pudo revertir la transaccion del relevador", exc_info=True)
+        # El llamador debe conocer el fallo; no actualizar la configuracion en memoria.
+        raise
+    finally:
+        _relay_cerrar_recursos(cur, cx)
+    # Solo publicar en memoria despues de que MySQL confirme commit.
     with relay_lock:
-        relay_configs[device_id] = config
+        relay_configs[device_id] = config.copy()
+    return config.copy()
 
 
 def convertir_valor(raw, tipo_conv):
@@ -1644,22 +1699,26 @@ def obtener_config_relevador():
         cursor.close(); conexion.close()
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    return jsonify(get_relay(device_id))
+    return jsonify(get_relay(device_id, incluir_guardada=True))
 
 
 @app.route('/api/relevador/config', methods=['POST'])
 @login_requerido
 def guardar_config_relevador():
-    data      = request.json or {}
-    device_id = data.get("device_id")
-    if not device_id:
-        return jsonify({"error": "Falta device_id"}), 400
-    device_id = int(device_id)
+    data = request.get_json(silent=True)
+    try:
+        if not isinstance(data, dict):
+            raise ValueError("Envia un objeto JSON valido.")
+        device_id = _relay_validar_entero(data.get("device_id"), "device_id", maximo=2147483647)
+        config = _relay_validar_config(data)
+    except ValueError as error:
+        return jsonify({"status": "error", "error": str(error)}), 400
+
     id_u = get_id_usuario()
-    print(f"[RELAY POST] device_id={device_id} id_u={id_u}")
+    conexion = cursor = None
     try:
         conexion = conectar_bd()
-        cursor   = conexion.cursor(dictionary=True)
+        cursor = conexion.cursor(dictionary=True)
         cursor.execute("""
             SELECT d.idDispositivo FROM dispositivos d
             WHERE d.idDispositivo = %s AND (
@@ -1670,14 +1729,27 @@ def guardar_config_relevador():
             )
         """, (device_id, id_u, device_id, id_u))
         if not cursor.fetchone():
-            cursor.close(); conexion.close()
-            return jsonify({"error": "No autorizado"}), 403
-        cursor.close(); conexion.close()
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    set_relay(device_id, data)
-    print(f"[RELAY dev={device_id}] modo={data.get('modo')} on={data.get('tiempo_on')}s")
-    return jsonify({"status": "ok", "config": get_relay(device_id)})
+            return jsonify({"status": "error", "error": "No autorizado"}), 403
+    except Exception:
+        app.logger.exception("Error verificando permiso de control del relevador")
+        return jsonify({"status": "error", "error": "No se pudo verificar el permiso de control. Revisa la conexion con MySQL."}), 503
+    finally:
+        _relay_cerrar_recursos(cursor, conexion)
+
+    try:
+        guardada = set_relay(device_id, config)
+    except ValueError as error:
+        return jsonify({"status": "error", "error": str(error)}), 400
+    except Exception:
+        app.logger.exception("Error guardando configuracion del relevador")
+        return jsonify({"status": "error", "error": "No se pudo confirmar el guardado en MySQL. La configuracion en memoria no se actualizo."}), 503
+
+    print(f"[RELAY dev={device_id}] Configuracion guardada: modo={guardada['modo']} "
+          f"on={guardada['tiempo_on']}s off={guardada['tiempo_off']}s")
+    # 'config' conserva el contrato anterior: tiempos efectivos con perfil/etapa.
+    # 'config_guardada' permite distinguirlos de los valores persistidos en MySQL.
+    return jsonify({"status": "ok", "config": get_relay(device_id),
+                    "config_guardada": guardada})
 
 
 @app.route('/api/relevador/estado', methods=['GET'])
@@ -3046,8 +3118,9 @@ def ciclo_riego_efectivo(device_id):
 def _riego_instalar(n):
     original_get_relay = n['get_relay']
 
-    def get_relay(device_id):
+    def get_relay(device_id, incluir_guardada=False):
         config = original_get_relay(device_id)
+        guardada = config.copy()
         try:
             ciclo = ciclo_riego_efectivo(int(device_id))
         except Exception:
@@ -3056,6 +3129,9 @@ def _riego_instalar(n):
         if ciclo:
             # Solo cambian los valores: el JSON que recibe el Mega conserva sus 4 claves.
             config['tiempo_on'], config['tiempo_off'] = ciclo['tiempo_on'], ciclo['tiempo_off']
+        if incluir_guardada:
+            # Solo el panel recibe la configuración base; el contrato del Arduino no cambia.
+            config['config_guardada'] = guardada
         return config
     n['get_relay'] = get_relay
 
@@ -3085,6 +3161,370 @@ def _riego_instalar(n):
 
 
 _riego_instalar(globals())
+
+
+# =====================================================================
+# EXPORTACIÓN HISTÓRICA A EXCEL — 21/10/2026
+# Consulta independiente: no cambia la adquisición ni el control de riego.
+# Dependencia opcional: python -m pip install "openpyxl>=3.1,<4"
+# =====================================================================
+
+EXPORTACION_MAX_FILAS = 50000  # Por hoja. Si se excede, no se entrega un archivo parcial.
+
+
+class _ErrorExportacion(ValueError):
+    def __init__(self, mensaje, codigo=400):
+        super().__init__(mensaje)
+        self.codigo = codigo
+
+
+def _exportar_validar_filtros(argumentos):
+    """Intervalo [desde, hasta), expresado en la hora almacenada en MySQL."""
+    import re
+    campos = ('device_id', 'desde', 'hasta')
+    for campo in campos:
+        if len(argumentos.getlist(campo)) != 1:
+            raise _ErrorExportacion('Indica una sola vez dispositivo, fecha inicial y fecha final.')
+    identificador = argumentos['device_id']
+    if (not re.fullmatch(r'[0-9]{1,10}', identificador)
+            or not 1 <= int(identificador) <= 2147483647):
+        raise _ErrorExportacion('Selecciona un dispositivo válido.')
+    fechas = []
+    for campo in ('desde', 'hasta'):
+        texto = argumentos[campo]
+        if not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?', texto):
+            raise _ErrorExportacion('Usa fechas con hora: AAAA-MM-DDTHH:MM, con segundos opcionales.')
+        try:
+            fecha = datetime.fromisoformat(texto)
+        except ValueError:
+            raise _ErrorExportacion('La fecha o la hora indicada no existe.') from None
+        if fecha.year < 1900:
+            raise _ErrorExportacion('La exportación admite fechas desde el año 1900.')
+        fechas.append(fecha)
+    if fechas[0] >= fechas[1]:
+        raise _ErrorExportacion('La fecha final debe ser posterior a la inicial.')
+    return int(identificador), fechas[0], fechas[1]
+
+
+def _exportar_leer_datos(device_id, desde, hasta):
+    """Lee ambas tablas en una misma instantánea de InnoDB, sin escrituras."""
+    conexion = cursor = None
+    try:
+        conexion = conectar_bd()
+        conexion.start_transaction(isolation_level='REPEATABLE READ',
+                                   consistent_snapshot=True, readonly=True)
+        cursor = conexion.cursor(dictionary=True, buffered=True)
+        cursor.execute('SELECT idUsuario FROM usuarios WHERE correo=%s LIMIT 1',
+                       (session.get('usuario_logueado'),))
+        usuario = cursor.fetchone()
+        if not usuario:
+            raise _ErrorExportacion('La sesión ya no es válida. Inicia sesión nuevamente.', 401)
+        dispositivo = permiso_rangos(cursor, device_id, usuario['idUsuario'])
+        if not dispositivo:
+            raise _ErrorExportacion('Dispositivo no encontrado o sin permiso de consulta.', 403)
+        cursor.execute('''SELECT NOW() AS hora_mysql, UTC_TIMESTAMP() AS hora_utc_mysql,
+                                 @@session.time_zone AS zona_sesion_mysql,
+                                 @@system_time_zone AS zona_sistema_mysql''')
+        relojes = cursor.fetchone()
+        relojes['hora_flask'] = datetime.now()
+
+        # La tabla es opcional en instalaciones anteriores. No se crea al exportar.
+        diagnosticos_disponibles = True
+        try:
+            cursor.execute('SELECT idMedicion FROM mediciones_agua LIMIT 0')
+            cursor.fetchall()
+        except mysql.connector.Error as error:
+            if error.errno != 1146:
+                raise
+            diagnosticos_disponibles = False
+
+        parametros = (device_id, desde, hasta, EXPORTACION_MAX_FILAS + 1)
+        cursor.execute('''SELECT r.idRegistro_sensor, s.idDispositivo, r.idSensor,
+                                 s.tipo_sensor, s.unidad_medida, r.valor, r.fecha_hora
+                          FROM registro_sensores r
+                          JOIN sensores s ON s.idSensore=r.idSensor
+                          WHERE s.idDispositivo=%s AND r.fecha_hora>=%s AND r.fecha_hora<%s
+                          ORDER BY r.fecha_hora, r.idSensor, r.idRegistro_sensor
+                          LIMIT %s''', parametros)
+        lecturas = cursor.fetchall()
+        if len(lecturas) > EXPORTACION_MAX_FILAS:
+            raise _ErrorExportacion('El intervalo supera 50 000 lecturas. Divídelo en intervalos más cortos.', 422)
+
+        diagnosticos = []
+        if diagnosticos_disponibles:
+            cursor.execute('''SELECT m.idMedicion, s.idDispositivo, m.idSensor, s.tipo_sensor,
+                                     m.idRegistro_sensor, m.estado, m.calibrado, m.voltaje,
+                                     m.tds_ppm, m.factor_k, m.temperatura_c,
+                                     m.fecha_hora AS fecha_hora_diagnostico,
+                                     r.valor AS valor_registrado, s.unidad_medida,
+                                     r.fecha_hora AS fecha_hora_lectura
+                              FROM mediciones_agua m
+                              JOIN sensores s ON s.idSensore=m.idSensor
+                              LEFT JOIN registro_sensores r ON r.idRegistro_sensor=m.idRegistro_sensor
+                              WHERE s.idDispositivo=%s AND m.fecha_hora>=%s AND m.fecha_hora<%s
+                              ORDER BY m.fecha_hora, m.idMedicion
+                              LIMIT %s''', parametros)
+            diagnosticos = cursor.fetchall()
+            if len(diagnosticos) > EXPORTACION_MAX_FILAS:
+                raise _ErrorExportacion('El intervalo supera 50 000 diagnósticos. Divídelo en intervalos más cortos.', 422)
+        if not lecturas and not diagnosticos:
+            detalle = '' if diagnosticos_disponibles else ' La tabla de diagnósticos de agua no está disponible.'
+            raise _ErrorExportacion('No hay registros disponibles para ese dispositivo e intervalo.' + detalle, 404)
+        return dict(dispositivo=dispositivo, desde=desde, hasta=hasta, relojes=relojes,
+                    lecturas=lecturas, diagnosticos=diagnosticos,
+                    diagnosticos_disponibles=diagnosticos_disponibles)
+    finally:
+        # Termina la instantánea y libera ambos recursos incluso si uno falla.
+        if conexion is not None:
+            try:
+                conexion.rollback()
+            except Exception:
+                app.logger.exception('No se pudo cerrar la transacción de exportación')
+        for recurso in (cursor, conexion):
+            if recurso is not None:
+                try:
+                    recurso.close()
+                except Exception:
+                    app.logger.exception('No se pudo liberar un recurso de exportación')
+
+
+def _exportar_generar_excel(datos):
+    """Genera XLSX con fechas/números reales y textos que nunca son fórmulas."""
+    from io import BytesIO
+    from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    libro = Workbook(write_only=True)
+    libro.properties.creator = 'HYDROSENSE'
+    libro.properties.title = 'Historial de sensores HYDROSENSE'
+    fuente = Font(name='Calibri', size=11)
+    fuente_cabecera = Font(name='Calibri', size=11, bold=True, color='FFFFFF')
+    fondo = PatternFill('solid', fgColor='216B50')
+
+    def celda(hoja, valor, identificador=False):
+        # Los identificadores se guardan como texto para conservar también BIGINT.
+        if identificador and valor is not None:
+            valor = str(valor)
+        resultado = WriteOnlyCell(hoja, value=valor)
+        resultado.font = fuente
+        if isinstance(valor, str):
+            resultado.data_type = 's'  # Incluso nombres que comiencen con '='.
+        elif isinstance(valor, datetime):
+            resultado.number_format = 'yyyy-mm-dd hh:mm:ss'
+        elif valor is not None:
+            resultado.number_format = '0.######'
+        return resultado
+
+    def hoja_datos(nombre, columnas, filas):
+        hoja = libro.create_sheet(nombre)
+        hoja.freeze_panes = 'A2'
+        hoja.sheet_view.showGridLines = False
+        hoja.auto_filter.ref = f'A1:{get_column_letter(len(columnas))}{len(filas) + 1}'
+        hoja.row_dimensions[1].height = 34
+        encabezados = []
+        for numero, (clave, titulo, ancho) in enumerate(columnas, 1):
+            hoja.column_dimensions[get_column_letter(numero)].width = ancho
+            c = celda(hoja, titulo)
+            c.font, c.fill = fuente_cabecera, fondo
+            c.alignment = Alignment(vertical='center', wrap_text=True)
+            encabezados.append(c)
+        hoja.append(encabezados)
+        for numero_fila, fila in enumerate(filas, 2):
+            celdas = [celda(hoja, fila.get(clave), clave.startswith('id'))
+                      for clave, _, _ in columnas]
+            if nombre == 'Informacion':
+                for c in celdas:
+                    c.alignment = Alignment(vertical='top', wrap_text=True)
+                hoja.row_dimensions[numero_fila].height = 44
+            hoja.append(celdas)
+        return hoja
+
+    relojes, dispositivo = datos['relojes'], datos['dispositivo']
+    informacion = [
+        ('Dispositivo ID', str(dispositivo['idDispositivo'])),
+        ('Nombre del dispositivo', dispositivo['nombre']),
+        ('Desde, incluido', datos['desde']),
+        ('Hasta, excluido', datos['hasta']),
+        ('Filas en Lecturas', len(datos['lecturas'])),
+        ('Filas en Diagnosticos_agua', len(datos['diagnosticos'])),
+        ('Tabla de diagnósticos', 'Disponible' if datos['diagnosticos_disponibles'] else
+         'No disponible. La hoja vacía no demuestra ausencia de fallos.'),
+        ('Hora de MySQL al exportar', relojes['hora_mysql']),
+        ('Hora UTC de MySQL al exportar', relojes['hora_utc_mysql']),
+        ('Hora de Flask al exportar', relojes['hora_flask']),
+        ('Zona de sesión MySQL', relojes['zona_sesion_mysql']),
+        ('Zona del sistema MySQL', relojes['zona_sistema_mysql']),
+        ('Interpretación de fechas', 'Fechas originales del servidor, sin conversión de zona horaria. '
+         'No son marcas de tiempo enviadas por Arduino. Verifica los relojes antes de filtrar.'),
+        ('Lecturas', 'Una fila por registro almacenado. Sin promediar, rellenar ni eliminar valores por rango agronómico.'),
+        ('Diagnósticos', 'Una fila por diagnóstico dentro del intervalo. Se conservan los que no tienen valor numérico.'),
+        ('Relación entre hojas', 'Relaciona idRegistro_sensor cuando exista. No sumes sus filas como muestras independientes.'),
+        ('Calibrado', '1: calibrado; 0: no calibrado; vacío: no disponible. Se conserva el estado registrado.'),
+        ('Unidades', 'Se conserva unidad_medida de la base. La luz es una escala relativa, aunque figure lux; '
+         'la distancia del ultrasonido no equivale a volumen de agua.'),
+        ('Valores vacíos', 'Representan datos no disponibles. Un cero numérico se conserva como cero.'),
+        ('Alcance', 'Copia del historial disponible. No sustituye un respaldo completo de la base de datos.'),
+    ]
+    hoja_datos('Informacion', [('campo', 'HYDROSENSE · Exportación de sensores', 42),
+                               ('contenido', 'Detalle', 115)],
+               [dict(campo=k, contenido=v) for k, v in informacion])
+    hoja_datos('Lecturas', [
+        ('idRegistro_sensor', 'idRegistro_sensor', 23), ('idDispositivo', 'idDispositivo', 18),
+        ('idSensor', 'idSensor', 15), ('tipo_sensor', 'Sensor', 24),
+        ('unidad_medida', 'Unidad registrada', 22), ('valor', 'Valor', 18),
+        ('fecha_hora', 'Fecha y hora del servidor', 26),
+    ], datos['lecturas'])
+    hoja_datos('Diagnosticos_agua', [
+        ('idMedicion', 'idMedicion', 24), ('idDispositivo', 'idDispositivo', 18),
+        ('idSensor', 'idSensor', 15), ('tipo_sensor', 'Sensor', 24),
+        ('idRegistro_sensor', 'idRegistro_sensor', 23), ('estado', 'Estado de medición', 25),
+        ('calibrado', 'Calibrado (1/0)', 20), ('voltaje', 'Voltaje (V)', 18),
+        ('tds_ppm', 'TDS (ppm)', 18), ('factor_k', 'Factor K registrado', 23),
+        ('temperatura_c', 'Temperatura (°C)', 22),
+        ('fecha_hora_diagnostico', 'Fecha y hora del diagnóstico', 29),
+        ('valor_registrado', 'Valor asociado', 20), ('unidad_medida', 'Unidad registrada', 22),
+        ('fecha_hora_lectura', 'Fecha y hora de la lectura', 29),
+    ], datos['diagnosticos'])
+    archivo = BytesIO()
+    libro.save(archivo)
+    archivo.seek(0)
+    return archivo
+
+
+@app.route('/api/exportaciones/lecturas.xlsx', methods=['GET'])
+@login_requerido
+def exportar_lecturas_excel():
+    """Descarga autenticada. La página /exportar permite usarla sin editar el dashboard."""
+    from flask import send_file
+    try:
+        device_id, desde, hasta = _exportar_validar_filtros(request.args)
+        try:
+            import openpyxl  # Opcional: su ausencia no impide iniciar ni usar HYDROSENSE.
+        except ImportError:
+            raise _ErrorExportacion('Falta la dependencia para Excel. Ejecuta: '
+                                   'python -m pip install "openpyxl>=3.1,<4" y reinicia Flask.', 503) from None
+        datos = _exportar_leer_datos(device_id, desde, hasta)
+        archivo = _exportar_generar_excel(datos)
+        nombre = f'HYDROSENSE_D{device_id}_{desde:%Y%m%d_%H%M%S}_{hasta:%Y%m%d_%H%M%S}.xlsx'
+        respuesta = send_file(archivo,
+                              mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                              as_attachment=True, download_name=nombre,
+                              conditional=False, etag=False, max_age=0)
+        respuesta.headers['Cache-Control'] = 'no-store, private'
+        respuesta.headers['X-Content-Type-Options'] = 'nosniff'
+        return respuesta
+    except _ErrorExportacion as error:
+        respuesta = jsonify(status='error', mensaje=str(error))
+        respuesta.status_code = error.codigo
+    except mysql.connector.Error:
+        app.logger.exception('Error de MySQL al exportar lecturas')
+        respuesta = jsonify(status='error', mensaje='No se pudo consultar el historial. Revisa la conexión con MySQL.')
+        respuesta.status_code = 503
+    except Exception:
+        app.logger.exception('Error al generar el Excel de sensores')
+        respuesta = jsonify(status='error', mensaje='No se pudo generar el archivo Excel. Revisa el registro del servidor.')
+        respuesta.status_code = 500
+    respuesta.headers['Cache-Control'] = 'no-store, private'
+    return respuesta
+
+
+@app.route('/exportar', methods=['GET'])
+@login_requerido
+def pagina_exportar_lecturas():
+    respuesta = app.make_response(render_template_string(EXPORTACION_HTML))
+    respuesta.headers['Cache-Control'] = 'no-store, private'
+    return respuesta
+
+
+EXPORTACION_HTML = r'''<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Exportar lecturas · HYDROSENSE</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f3f7f4;color:#183b2c;font:16px/1.55 system-ui,sans-serif}
+main{max-width:760px;margin:48px auto;padding:28px;background:white;border:1px solid #dce8df;border-radius:16px}
+h1{font-size:28px;margin:12px 0}a{color:#216b50}label{display:block;font-weight:600;margin:16px 0 6px}
+input,select,button{font:inherit;width:100%;padding:11px;border:1px solid #aabeb0;border-radius:8px}
+button{background:#216b50;color:white;border:0;margin-top:24px;cursor:pointer}button:disabled{opacity:.6;cursor:wait}
+.fechas{display:grid;grid-template-columns:1fr 1fr;gap:16px}.nota{color:#4c6255;font-size:14px}
+#mensaje{min-height:24px;overflow-wrap:anywhere}.error{color:#a22b21}@media(max-width:600px){main{margin:16px;padding:20px}.fechas{grid-template-columns:1fr}}
+</style></head><body><main>
+<a href="{{ url_for('dashboard') }}">Volver al panel</a>
+<h1>Exportar lecturas a Excel</h1>
+<p>Descarga el historial de un dispositivo y los diagnósticos disponibles del agua.</p>
+<form id="exportacion" action="{{ url_for('exportar_lecturas_excel') }}" method="get">
+<label for="device_id">Dispositivo</label><select id="device_id" name="device_id" required disabled><option value="">Cargando dispositivos…</option></select>
+<div class="fechas"><div><label for="desde">Fecha y hora inicial</label><input id="desde" name="desde" type="datetime-local" step="1" required></div>
+<div><label for="hasta">Fecha y hora final</label><input id="hasta" name="hasta" type="datetime-local" step="1" required></div></div>
+<p class="nota">Usa la hora almacenada en el servidor. Se incluye la hora inicial y se excluye la final.
+El archivo conserva los valores registrados y los datos faltantes.</p>
+<button id="descargar" type="submit" disabled>Descargar Excel</button>
+</form><p id="mensaje" role="status" aria-live="polite">Consultando los dispositivos disponibles…</p>
+<p class="nota">El archivo contiene Lecturas, Diagnosticos_agua e Informacion. La última incluye conteos y los relojes del servidor para revisar el intervalo.</p>
+<noscript>Activa JavaScript para seleccionar el dispositivo y descargar el archivo.</noscript>
+</main><script>
+(() => {
+  const formulario = document.getElementById('exportacion');
+  const selector = document.getElementById('device_id');
+  const boton = document.getElementById('descargar');
+  const mensaje = document.getElementById('mensaje');
+  const desde = document.getElementById('desde'), hasta = document.getElementById('hasta');
+  let descargando = false;
+  const mostrar = (texto, error = false) => { mensaje.textContent = texto; mensaje.className = error ? 'error' : ''; };
+  async function errorRespuesta(respuesta) {
+    if (respuesta.status === 401 || respuesta.redirected) return 'Tu sesión terminó. Vuelve al panel e inicia sesión.';
+    try { const datos = await respuesta.json(); return datos.mensaje || datos.error || 'No se pudo completar la solicitud.'; }
+    catch (_) { return 'El servidor no devolvió una respuesta válida.'; }
+  }
+  async function cargarDispositivos() {
+    try {
+      const respuesta = await fetch({{ url_for('obtener_lista_dispositivos')|tojson }}, {credentials:'same-origin', cache:'no-store'});
+      if (!respuesta.ok || respuesta.redirected) throw new Error(await errorRespuesta(respuesta));
+      const datos = await respuesta.json();
+      if (!Array.isArray(datos)) throw new Error('La lista de dispositivos no es válida.');
+      selector.replaceChildren(new Option('Selecciona un dispositivo', ''));
+      const ids = new Set();
+      for (const dispositivo of datos) {
+        const id = Number(dispositivo.idDispositivo);
+        if (!Number.isInteger(id) || id < 1 || id > 2147483647) throw new Error('La lista contiene un dispositivo no válido.');
+        if (!ids.has(id)) selector.add(new Option(`${dispositivo.nombre || 'Dispositivo'} (ID ${id})`, String(id)));
+        ids.add(id);
+      }
+      if (!ids.size) { mostrar('No tienes dispositivos disponibles para exportar.'); return; }
+      selector.disabled = false; boton.disabled = false;
+      mostrar('Selecciona el dispositivo y el intervalo que deseas descargar.');
+    } catch (error) { mostrar(error.message, true); }
+  }
+  formulario.addEventListener('submit', async evento => {
+    evento.preventDefault();
+    if (descargando || !formulario.reportValidity()) return;
+    if (desde.value >= hasta.value) { mostrar('La fecha final debe ser posterior a la inicial.', true); return; }
+    const parametros = new URLSearchParams(new FormData(formulario));
+    const controles = Array.from(formulario.elements);
+    const estados = controles.map(control => control.disabled);
+    descargando = true; controles.forEach(control => { control.disabled = true; });
+    mostrar('Preparando el Excel con los registros almacenados…');
+    try {
+      const respuesta = await fetch(formulario.action + '?' + parametros, {credentials:'same-origin', cache:'no-store'});
+      if (!respuesta.ok || respuesta.redirected) throw new Error(await errorRespuesta(respuesta));
+      if (!(respuesta.headers.get('Content-Type') || '').includes('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')) {
+        throw new Error('El servidor no devolvió un archivo Excel.');
+      }
+      const archivo = await respuesta.blob();
+      if (!archivo.size) throw new Error('El archivo recibido está vacío.');
+      const url = URL.createObjectURL(archivo), enlace = document.createElement('a');
+      const nombre = (respuesta.headers.get('Content-Disposition') || '').match(/filename="?([^";]+)"?/i);
+      enlace.href = url; enlace.download = nombre ? nombre[1] : 'HYDROSENSE_lecturas.xlsx';
+      document.body.append(enlace); enlace.click(); enlace.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      mostrar('Descarga iniciada. Revisa Informacion para comprobar fechas y cantidades.');
+    } catch (error) { mostrar(error.message || 'No se pudo descargar el archivo.', true); }
+    finally { controles.forEach((control, i) => { control.disabled = estados[i]; }); descargando = false; }
+  });
+  cargarDispositivos();
+})();
+</script></body></html>'''
 
 
 if __name__ == '__main__':

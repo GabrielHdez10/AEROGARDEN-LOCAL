@@ -718,7 +718,53 @@
             color: #1a2e22;
             font-size: 14px;
         }
-    </style>
+    
+        /* Acceso a la exportación histórica: estilos limitados a esta tarjeta. */
+        .exportacion-excel {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 18px;
+            margin: 0 0 20px;
+            padding: 20px;
+        }
+        .exportacion-excel-texto { flex: 1 1 300px; min-width: 0; }
+        .exportacion-excel h2 {
+            font-family: 'DM Sans', sans-serif;
+            font-size: 17px;
+            font-weight: 600;
+            margin: 0 0 6px;
+            color: #1a3d2b;
+        }
+        .exportacion-excel p {
+            margin: 0;
+            color: #526b5c;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        .exportacion-excel-accion { display: flex; flex-direction: column; gap: 7px; }
+        .exportacion-excel-enlace {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 11px 20px;
+            border: 1px solid #2d6a4f;
+            border-radius: 10px;
+            background: #2d6a4f;
+            color: #fff;
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 600;
+            line-height: 1.5;
+        }
+        .exportacion-excel-enlace:hover { background: #1a3d2b; border-color: #1a3d2b; }
+        .exportacion-excel-enlace:focus-visible { outline: 3px solid #52b788; outline-offset: 3px; }
+        .exportacion-excel small { color: #526b5c; font-size: 12px; }
+        @media (max-width: 600px) {
+            .exportacion-excel-accion { width: 100%; }
+        }
+</style>
 </head>
 <body>
 
@@ -833,6 +879,7 @@
             <div class="inicio-panel-body" id="inicio-bomba">
                 <div class="inicio-vacio">Cargando estado...</div>
             </div>
+            <p id="inicio-msg-bomba" role="status" aria-live="polite" style="font-size:12px; padding:0 16px 14px; display:none;"></p>
         </div>
 
     </div>
@@ -871,6 +918,22 @@
 
 <div id="seccion-analitica" class="seccion">
     <h1 data-i18n="analitica_titulo">Analítica y Reportes</h1>
+
+    <!-- Exportación disponible con el app.py que incorpora la ruta /exportar. -->
+    <div class="card exportacion-excel" id="exportacion-excel" aria-labelledby="exportacion-excel-titulo">
+        <div class="exportacion-excel-texto">
+            <h2 id="exportacion-excel-titulo">Historial en Excel</h2>
+            <p>Selecciona un dispositivo, fecha y hora para descargar las lecturas
+                almacenadas y los diagnósticos disponibles del agua.</p>
+        </div>
+        <div class="exportacion-excel-accion">
+            <a class="exportacion-excel-enlace" id="abrir-exportacion-excel"
+               href="{{ request.script_root }}/exportar" target="_blank" rel="noopener"
+               aria-describedby="exportacion-excel-aviso">Exportar a Excel</a>
+            <small id="exportacion-excel-aviso">Se abre en una nueva pestaña.</small>
+        </div>
+    </div>
+
 
     <div class="tabs">
         <button class="tab-btn activo" onclick="cambiarTabAnalitica('tab-an-sensores', this)" data-i18n="analitica_tab_sensores">📡 Sensores</button>
@@ -1066,6 +1129,7 @@
         <div>
             <div style="font-size:18px; font-weight:700;" id="texto-estado-bomba">Estado: —</div>
             <div style="font-size:13px; color:#888; margin-top:4px;" id="texto-modo-bomba">Modo: —</div>
+            <p style="font-size:12px; color:#666; margin-top:6px;">El panel muestra la configuración. El encendido físico se verifica en el prototipo.</p>
         </div>
         <div style="margin-left:auto; display:flex; gap:8px; flex-wrap:wrap;">
             <button class="btn-verde" onclick="controlManualBomba('encendido')" data-i18n="bomba_encender">⚡ Encender ahora</button>
@@ -1076,26 +1140,28 @@
     
     <div class="card">
         <h3 style="margin-bottom:14px; color:#2c3e50;" data-i18n="bomba_temporizador">⏱ Temporizador Automático</h3>
+        <p id="detalle-config-bomba" style="font-size:13px; color:#526b5c; line-height:1.6; margin-bottom:12px;">Consulta la configuración antes de editar los tiempos.</p>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
             <div>
                 <label>Tiempo <strong>ENCENDIDA</strong> (segundos)</label>
-                <input type="number" id="input-tiempo-on" min="1" max="3600" value="30"
+                <input type="number" id="input-tiempo-on" min="1" max="3600" step="1" value="" placeholder="Consultar"
                        oninput="actualizarPreviewBomba()"
                        style="font-size:22px; font-weight:700; text-align:center; color:#27ae60;">
-                <div style="font-size:12px; color:#aaa; margin-top:2px;" id="preview-on">= 30 seg</div>
+                <div style="font-size:12px; color:#aaa; margin-top:2px;" id="preview-on">Consulta los tiempos del servidor</div>
             </div>
             <div>
                 <label>Tiempo <strong>APAGADA</strong> (segundos)</label>
-                <input type="number" id="input-tiempo-off" min="1" max="3600" value="60"
+                <input type="number" id="input-tiempo-off" min="1" max="3600" step="1" value="" placeholder="Consultar"
                        oninput="actualizarPreviewBomba()"
                        style="font-size:22px; font-weight:700; text-align:center; color:#e74c3c;">
-                <div style="font-size:12px; color:#aaa; margin-top:2px;" id="preview-off">= 60 seg</div>
+                <div style="font-size:12px; color:#aaa; margin-top:2px;" id="preview-off">Consulta los tiempos del servidor</div>
             </div>
         </div>
         <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
             <button class="btn-verde" onclick="guardarConfigBomba()" data-i18n="bomba_guardar">💾 Guardar temporizador</button>
             <button onclick="guardarConfigBomba()" data-i18n="bomba_modo_auto_btn">🔄 Volver a modo automático</button>
-            <span id="msg-config-bomba" style="font-size:13px; color:#27ae60; display:none;">✔ Guardado</span>
+            <button onclick="cargarSeccionRelevador()">Consultar configuración</button>
+            <span id="msg-config-bomba" role="status" aria-live="polite" style="font-size:13px; color:#287454; display:none;"></span>
         </div>
     </div>
 
@@ -1652,83 +1718,336 @@
     </div>
 </div>
 
+
+
 <script>
-// ================================================================
-//  CONTROL BOMBA / RELEVADOR — integrado en dashboard.html
-// ================================================================
+// Interceptar mostrarSeccion para marcar nav activo
+(function() {
+    // Mapa seccion -> indice del boton en el nav
+    const seccionABtn = {
+        'dashboard-contenido': 0,
+        'seccion-hardware': 1,
+        'seccion-logica': 2,
+        'seccion-analitica': 3,
+        'seccion-cultivos': 4,
+        'seccion-alertas': 5,
+        'seccion-relevador': 6,
+        'seccion-wifi': 7,
+        'seccion-configuracion': 8,
+    };
 
-let ID_SENSOR_NIVEL = null; // se detecta automáticamente según el dispositivo seleccionado
-const UMBRAL_NIVEL_BAJO_CM = 20; // distancia > 20 cm = poco agua en el depósito
-
-async function cargarSeccionRelevador() {
-    if (!dispositivoActualId) {
-        await cargarDispositivosGlobal();
+    function marcarNavActivo(seccionId) {
+        const btns = document.querySelectorAll('nav button');
+        btns.forEach(b => b.classList.remove('nav-btn-activo'));
+        const idx = seccionABtn[seccionId];
+        if (idx !== undefined && btns[idx]) {
+            btns[idx].classList.add('nav-btn-activo');
+        }
     }
-    // Sincronizar el select de bomba con el dispositivo actual
-    const sel = document.getElementById('select-bomba-dispositivo');
-    if (sel && dispositivoActualId) sel.value = dispositivoActualId;
 
-    try {
-        const res  = await fetch("/api/relevador/config?device_id=" + dispositivoActualId);
-        const data = await res.json();
-        document.getElementById("input-tiempo-on").value  = data.tiempo_on  || 30;
-        document.getElementById("input-tiempo-off").value = data.tiempo_off || 60;
-        actualizarPreviewBomba();
-        actualizarIndicadorBomba(data.modo, data.estado_manual);
-        actualizarNivelAgua();
-    } catch(e) { console.error("Error cargando relevador:", e); }
+    // Esperar a que dashboard.js cargue y sobreescribir mostrarSeccion
+    window.addEventListener('load', function() {
+        const originalMostrar = window.mostrarSeccion;
+        if (typeof originalMostrar === 'function') {
+            window.mostrarSeccion = function(id) {
+                originalMostrar(id);
+                marcarNavActivo(id);
+            };
+        }
+        // Marcar inicio por defecto
+        marcarNavActivo('dashboard-contenido');
+    });
+})();
+</script>
+<script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js', v='agua-20261006') }}"></script>
+<script>
+// CONTROL BOMBA / RELEVADOR. Se carga después de dashboard.js para que
+// las funciones de esta pantalla usen sus IDs actuales, sin cambiar ese archivo.
+let ID_SENSOR_NIVEL = null;
+const UMBRAL_NIVEL_BAJO_CM = 20;
+let bombaSolicitudActiva = false;
+let bombaRevisionCarga = 0;
+let bombaConfigConfirmada = null;
+let bombaControlesBloqueados = [];
+
+function bombaValidarSegundos(valor, nombre) {
+    const texto = String(valor ?? '').trim();
+    const numero = Number(texto);
+    if (!/^\d+$/.test(texto) || !Number.isInteger(numero) || numero < 1 || numero > 3600) {
+        throw new Error(nombre + ': escribe un número entero entre 1 y 3600 segundos.');
+    }
+    return numero;
 }
 
-async function guardarConfigBomba() {
-    if (!dispositivoActualId) { alert('Selecciona un dispositivo primero'); return; }
-    const on  = parseInt(document.getElementById("input-tiempo-on").value)  || 30;
-    const off = parseInt(document.getElementById("input-tiempo-off").value) || 60;
-    try {
-        await fetch("/api/relevador/config", {
-            method:  "POST",
-            headers: {"Content-Type": "application/json"},
-            body:    JSON.stringify({ device_id: dispositivoActualId, tiempo_on: on, tiempo_off: off, modo: "automatico" })
-        });
-        const msg = document.getElementById("msg-config-bomba");
-        msg.style.display = "inline";
-        setTimeout(() => msg.style.display = "none", 2500);
-        actualizarIndicadorBomba("automatico", "apagado");
-    } catch(e) { alert("Error al guardar: " + e); }
+function bombaValidarConfig(data) {
+    if (!data || !['manual', 'automatico'].includes(data.modo) ||
+        !['encendido', 'apagado'].includes(data.estado_manual)) {
+        throw new Error('El servidor devolvió una configuración de bomba incompleta.');
+    }
+    return {
+        tiempo_on: bombaValidarSegundos(data.tiempo_on, 'Tiempo encendida'),
+        tiempo_off: bombaValidarSegundos(data.tiempo_off, 'Tiempo apagada'),
+        modo: data.modo,
+        estado_manual: data.estado_manual
+    };
 }
 
-async function controlManualBomba(estado) {
-    if (!dispositivoActualId) { alert('Selecciona un dispositivo primero'); return; }
-    const on  = parseInt(document.getElementById("input-tiempo-on").value)  || 30;
-    const off = parseInt(document.getElementById("input-tiempo-off").value) || 60;
-    try {
-        await fetch("/api/relevador/config", {
-            method:  "POST",
-            headers: {"Content-Type": "application/json"},
-            body:    JSON.stringify({ device_id: dispositivoActualId, modo: "manual", estado_manual: estado, tiempo_on: on, tiempo_off: off })
+function bombaMostrarMensaje(texto, error = false) {
+    for (const id of ['msg-config-bomba', 'inicio-msg-bomba']) {
+        const nodo = document.getElementById(id);
+        if (!nodo) continue;
+        nodo.textContent = texto;
+        nodo.style.color = error ? '#b42318' : '#287454';
+        nodo.style.display = texto ? 'block' : 'none';
+    }
+}
+
+function bombaBloquearControles(bloquear) {
+    if (bloquear) {
+        const selector = '#seccion-relevador button, #inicio-bomba button, ' +
+            '#input-tiempo-on, #input-tiempo-off, #select-bomba-dispositivo';
+        bombaControlesBloqueados = [...document.querySelectorAll(selector)].map(nodo => {
+            const anterior = nodo.disabled;
+            nodo.disabled = true;
+            return [nodo, anterior];
         });
-        actualizarIndicadorBomba("manual", estado);
-    } catch(e) { alert("Error: " + e); }
+    } else {
+        bombaControlesBloqueados.forEach(([nodo, anterior]) => { nodo.disabled = anterior; });
+        bombaControlesBloqueados = [];
+    }
+}
+
+async function bombaPedirJSON(url, opciones = {}) {
+    const controlador = new AbortController();
+    const espera = setTimeout(() => controlador.abort(), 15000);
+    try {
+        const respuesta = await fetch(url, {
+            credentials: 'same-origin', cache: 'no-store', ...opciones,
+            signal: controlador.signal
+        });
+        if (respuesta.redirected || respuesta.status === 401) {
+            throw new Error('La sesión no está disponible. Vuelve a iniciar sesión.');
+        }
+        let data;
+        try { data = await respuesta.json(); }
+        catch (_) { throw new Error('El servidor no devolvió una respuesta JSON válida.'); }
+        if (!respuesta.ok || data?.error || data?.status === 'error') {
+            throw new Error(data?.error || data?.mensaje || 'No se pudo completar la solicitud.');
+        }
+        return data;
+    } catch (error) {
+        if (error.name === 'AbortError') throw new Error('El servidor tardó demasiado en responder.');
+        if (error instanceof TypeError) throw new Error('No se pudo conectar con Flask. Revisa que el servidor esté encendido.');
+        throw error;
+    } finally {
+        clearTimeout(espera);
+    }
+}
+
+function bombaTextoConfiguracion(data) {
+    if (!data) return 'Configuración sin confirmar';
+    if (data.modo === 'automatico') return 'Programa automático configurado';
+    return data.estado_manual === 'encendido' ? 'Orden configurada: encender' : 'Orden configurada: apagar';
 }
 
 function actualizarIndicadorBomba(modo, estadoManual) {
-    const ind  = document.getElementById("indicador-bomba");
-    const txtE = document.getElementById("texto-estado-bomba");
-    const txtM = document.getElementById("texto-modo-bomba");
-    if (!ind) return;
-    const enc = (modo === "manual" && estadoManual === "encendido");
-    ind.style.background = enc ? "#27ae60" : "#95a5a6";
-    ind.style.boxShadow  = enc
-        ? "0 0 0 6px #e8f5e9, 0 0 20px rgba(39,174,96,0.4)"
-        : "0 0 0 6px #ecf0f1";
-    txtE.textContent = enc ? "Estado: ENCENDIDA 🟢" : "Estado: APAGADA ⚫";
-    txtM.textContent = modo === "manual" ? "Modo: Manual" : "Modo: Automático (temporizador)";
+    const ind = document.getElementById('indicador-bomba');
+    const txtE = document.getElementById('texto-estado-bomba');
+    const txtM = document.getElementById('texto-modo-bomba');
+    const data = modo ? { modo, estado_manual: estadoManual } : null;
+    if (ind) {
+        ind.style.background = modo === 'automatico' ? '#2980b9' : '#95a5a6';
+        ind.style.boxShadow = '0 0 0 6px #ecf0f1';
+    }
+    if (txtE) txtE.textContent = bombaTextoConfiguracion(data);
+    if (txtM) txtM.textContent = modo ? (modo === 'manual' ? 'Modo: Manual' : 'Modo: Automático (temporizador)') : 'Modo: —';
+}
+
+function bombaPintarInicio(data) {
+    const cont = document.getElementById('inicio-bomba');
+    if (!cont) return;
+    // Solo se insertan números validados y textos fijos. No se interpreta HTML del servidor.
+    cont.innerHTML = `
+        <div class="bomba-mini">
+            <div class="bomba-dot" style="background:${data?.modo === 'automatico' ? '#2980b9' : '#95a5a6'}"></div>
+            <div>
+                <div style="font-weight:700;font-size:15px;color:#2c3e50;">${bombaTextoConfiguracion(data)}</div>
+                <div style="font-size:12px;color:#666;margin-top:2px;">${data ? `Tiempos recibidos: ON ${data.tiempo_on}s / OFF ${data.tiempo_off}s` : 'Consulta la configuración antes de repetir una orden.'}</div>
+                <div style="font-size:12px;color:#666;margin-top:4px;">El funcionamiento físico se verifica en el prototipo.</div>
+            </div>
+        </div>
+        <div style="padding:0 16px 14px;display:flex;gap:8px;">
+            <button class="btn-verde btn-sm" onclick="controlManualBomba('encendido')">Encender</button>
+            <button class="btn-rojo btn-sm" onclick="controlManualBomba('apagado')">Apagar</button>
+        </div>`;
+    if (bombaSolicitudActiva) cont.querySelectorAll('button').forEach(nodo => { nodo.disabled = true; });
+}
+
+function bombaAplicarConfig(deviceId, efectiva, guardada = null) {
+    const formulario = guardada || efectiva;
+    bombaConfigConfirmada = { deviceId, config: formulario };
+    document.getElementById('input-tiempo-on').value = formulario.tiempo_on;
+    document.getElementById('input-tiempo-off').value = formulario.tiempo_off;
+    actualizarPreviewBomba();
+    actualizarIndicadorBomba(efectiva.modo, efectiva.estado_manual);
+    const detalle = document.getElementById('detalle-config-bomba');
+    const distintos = guardada && (guardada.tiempo_on !== efectiva.tiempo_on || guardada.tiempo_off !== efectiva.tiempo_off);
+    detalle.textContent = (guardada ? `Temporizador guardado: ON ${guardada.tiempo_on}s / OFF ${guardada.tiempo_off}s. ` : '') +
+        `Tiempos efectivos del servidor: ON ${efectiva.tiempo_on}s / OFF ${efectiva.tiempo_off}s.` +
+        (distintos ? ' El perfil de riego tiene prioridad sobre los tiempos escritos.' : '');
+    bombaPintarInicio(efectiva);
+}
+
+async function bombaConsultarConfiguracion(deviceId) {
+    const respuesta = await bombaPedirJSON('/api/relevador/config?device_id=' + deviceId);
+    if (!respuesta?.config_guardada) {
+        throw new Error('Falta el temporizador base. Instala el app.py del paquete integrado junto con este dashboard.');
+    }
+    return {
+        efectiva: bombaValidarConfig(respuesta),
+        guardada: bombaValidarConfig(respuesta.config_guardada)
+    };
+}
+
+async function cargarSeccionRelevador() {
+    if (bombaSolicitudActiva) return false;
+    if (!dispositivoActualId) await cargarDispositivosGlobal();
+    const deviceId = Number(dispositivoActualId);
+    const revision = ++bombaRevisionCarga;
+    if (!Number.isInteger(deviceId) || deviceId < 1) {
+        bombaMostrarMensaje('Selecciona un dispositivo primero.', true);
+        return false;
+    }
+    const sel = document.getElementById('select-bomba-dispositivo');
+    if (sel) sel.value = String(deviceId);
+    if (bombaConfigConfirmada?.deviceId !== deviceId) ID_SENSOR_NIVEL = null;
+    bombaConfigConfirmada = null;
+    document.getElementById('input-tiempo-on').value = '';
+    document.getElementById('input-tiempo-off').value = '';
+    document.getElementById('detalle-config-bomba').textContent = 'Consultando los tiempos del dispositivo seleccionado...';
+    actualizarPreviewBomba();
+    bombaMostrarMensaje('Consultando configuración...');
+    actualizarIndicadorBomba(null, null);
+    try {
+        const configuracion = await bombaConsultarConfiguracion(deviceId);
+        if (revision !== bombaRevisionCarga || deviceId !== Number(dispositivoActualId) || bombaSolicitudActiva) return false;
+        bombaAplicarConfig(deviceId, configuracion.efectiva, configuracion.guardada);
+        bombaMostrarMensaje('Configuración recibida del servidor.');
+        actualizarNivelAgua();
+        return true;
+    } catch (error) {
+        if (revision === bombaRevisionCarga && deviceId === Number(dispositivoActualId)) {
+            bombaMostrarMensaje('No se pudo consultar la configuración: ' + error.message, true);
+        }
+        return false;
+    }
+}
+
+async function bombaEnviarConfiguracion(modo, estadoManual = 'apagado') {
+    if (bombaSolicitudActiva) return false;
+    const deviceId = Number(dispositivoActualId);
+    if (!Number.isInteger(deviceId) || deviceId < 1) {
+        bombaMostrarMensaje('Selecciona un dispositivo primero.', true);
+        return false;
+    }
+    if (!['automatico', 'manual'].includes(modo) || !['encendido', 'apagado'].includes(estadoManual)) return false;
+    bombaSolicitudActiva = true;
+    ++bombaRevisionCarga; // Una consulta anterior no puede sobrescribir el resultado de esta orden.
+    bombaBloquearControles(true);
+    let envioIniciado = false;
+    try {
+        let tiempos;
+        if (modo === 'automatico') {
+            if (bombaConfigConfirmada?.deviceId !== deviceId) {
+                throw new Error('Consulta primero la configuración del dispositivo seleccionado.');
+            }
+            tiempos = {
+                tiempo_on: bombaValidarSegundos(document.getElementById('input-tiempo-on').value, 'Tiempo encendida'),
+                tiempo_off: bombaValidarSegundos(document.getElementById('input-tiempo-off').value, 'Tiempo apagada')
+            };
+        } else {
+            // Los botones manuales no guardan cambios del temporizador aún sin enviar.
+            // Desde Inicio se consulta primero para no sustituir los tiempos por 30/60.
+            tiempos = bombaConfigConfirmada?.deviceId === deviceId ? bombaConfigConfirmada.config :
+                (await bombaConsultarConfiguracion(deviceId)).guardada;
+        }
+        if (deviceId !== Number(dispositivoActualId)) throw new Error('Cambió el dispositivo. La orden no se envió.');
+        const solicitud = { device_id: deviceId, tiempo_on: tiempos.tiempo_on, tiempo_off: tiempos.tiempo_off, modo, estado_manual: estadoManual };
+        bombaMostrarMensaje('Enviando configuración...');
+        envioIniciado = true;
+        const resultado = await bombaPedirJSON('/api/relevador/config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(solicitud)
+        });
+        // config_guardada la añade el app.py revisado. Una respuesta antigua no confirma persistencia.
+        if (resultado?.status !== 'ok' || !resultado.config_guardada) {
+            throw new Error('Falta la confirmación de guardado. Utiliza el app.py revisado junto con este dashboard.');
+        }
+        const guardada = bombaValidarConfig(resultado.config_guardada);
+        const efectiva = bombaValidarConfig(resultado.config);
+        if (Object.keys(guardada).some(clave => guardada[clave] !== solicitud[clave])) {
+            throw new Error('La configuración confirmada no coincide con la enviada.');
+        }
+        if (deviceId !== Number(dispositivoActualId)) return false;
+        bombaAplicarConfig(deviceId, efectiva, guardada);
+        bombaMostrarMensaje('Configuración guardada en MySQL. Comprueba su ejecución en el prototipo.');
+        return true;
+    } catch (error) {
+        if (deviceId === Number(dispositivoActualId)) {
+            if (envioIniciado) {
+                bombaConfigConfirmada = null;
+                actualizarIndicadorBomba(null, null);
+                bombaPintarInicio(null);
+            }
+            bombaMostrarMensaje(error.message + (envioIniciado ? ' El panel no confirmó el guardado. Consulta la configuración antes de repetir.' : ''), true);
+        }
+        return false;
+    } finally {
+        bombaSolicitudActiva = false;
+        bombaBloquearControles(false);
+        // El panel de inicio pudo renovar sus botones al mostrar la respuesta.
+        document.querySelectorAll('#inicio-bomba button').forEach(nodo => { nodo.disabled = false; });
+    }
+}
+
+async function guardarConfigBomba() {
+    return bombaEnviarConfiguracion('automatico');
+}
+
+async function controlManualBomba(estado) {
+    return bombaEnviarConfiguracion('manual', estado);
+}
+
+async function _panelBomba() {
+    const deviceId = Number(dispositivoActualId);
+    const revision = bombaRevisionCarga;
+    if (!Number.isInteger(deviceId) || deviceId < 1 || bombaSolicitudActiva) return;
+    try {
+        const data = bombaValidarConfig(await bombaPedirJSON('/api/relevador/estado?device_id=' + deviceId));
+        if (deviceId === Number(dispositivoActualId) && revision === bombaRevisionCarga && !bombaSolicitudActiva) bombaPintarInicio(data);
+    } catch (error) {
+        if (deviceId === Number(dispositivoActualId) && revision === bombaRevisionCarga && !bombaSolicitudActiva) {
+            bombaPintarInicio(null);
+            bombaMostrarMensaje('No se pudo consultar la bomba: ' + error.message, true);
+        }
+    }
 }
 
 function actualizarPreviewBomba() {
-    const on  = parseInt(document.getElementById("input-tiempo-on").value)  || 0;
-    const off = parseInt(document.getElementById("input-tiempo-off").value) || 0;
-    document.getElementById("preview-on").textContent  = fmtSeg(on);
-    document.getElementById("preview-off").textContent = fmtSeg(off);
+    for (const [inputId, previewId, nombre] of [
+        ['input-tiempo-on', 'preview-on', 'Tiempo encendida'],
+        ['input-tiempo-off', 'preview-off', 'Tiempo apagada']
+    ]) {
+        const campo = document.getElementById(inputId);
+        const vista = document.getElementById(previewId);
+        try {
+            vista.textContent = fmtSeg(bombaValidarSegundos(campo.value, nombre));
+            campo.setCustomValidity('');
+        } catch (error) {
+            vista.textContent = 'Entero entre 1 y 3600 segundos';
+            campo.setCustomValidity(error.message);
+        }
+    }
 }
 
 function fmtSeg(s) {
@@ -1772,48 +2091,6 @@ setInterval(() => {
     if (sec && sec.style.display !== "none") actualizarNivelAgua();
 }, 10000);
 </script>
-
-<script>
-// Interceptar mostrarSeccion para marcar nav activo
-(function() {
-    // Mapa seccion -> indice del boton en el nav
-    const seccionABtn = {
-        'dashboard-contenido': 0,
-        'seccion-hardware': 1,
-        'seccion-logica': 2,
-        'seccion-analitica': 3,
-        'seccion-cultivos': 4,
-        'seccion-alertas': 5,
-        'seccion-relevador': 6,
-        'seccion-wifi': 7,
-        'seccion-configuracion': 8,
-    };
-
-    function marcarNavActivo(seccionId) {
-        const btns = document.querySelectorAll('nav button');
-        btns.forEach(b => b.classList.remove('nav-btn-activo'));
-        const idx = seccionABtn[seccionId];
-        if (idx !== undefined && btns[idx]) {
-            btns[idx].classList.add('nav-btn-activo');
-        }
-    }
-
-    // Esperar a que dashboard.js cargue y sobreescribir mostrarSeccion
-    window.addEventListener('load', function() {
-        const originalMostrar = window.mostrarSeccion;
-        if (typeof originalMostrar === 'function') {
-            window.mostrarSeccion = function(id) {
-                originalMostrar(id);
-                marcarNavActivo(id);
-            };
-        }
-        // Marcar inicio por defecto
-        marcarNavActivo('dashboard-contenido');
-    });
-})();
-</script>
-<script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
-<script src="{{ url_for('static', filename='js/dashboard.js', v='agua-20261006') }}"></script>
 <script>
 function cambiarIdiomaApp(lang) {
     setIdioma(lang);
