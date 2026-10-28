@@ -16,6 +16,8 @@ import string
 import smtplib
 from email.mime.text import MIMEText
 import tempfile
+import hashlib
+import json
 
 load_dotenv()
 
@@ -270,7 +272,7 @@ def _relay_cerrar_recursos(cursor, conexion):
                 app.logger.warning("No se pudo cerrar %s del relevador", nombre, exc_info=True)
 
 
-def set_relay(device_id: int, data: dict):
+def set_relay(device_id: int, data: dict, id_usuario=None):
     device_id = _relay_validar_entero(device_id, "device_id", maximo=2147483647)
     config = _relay_validar_config(data)
     cx = cur = None
@@ -287,6 +289,11 @@ def set_relay(device_id: int, data: dict):
                 estado_manual = VALUES(estado_manual)
         """, (device_id, config["tiempo_on"], config["tiempo_off"],
               config["modo"], config["estado_manual"]))
+        # Misma transaccion: una configuracion fallida nunca deja un evento guardado.
+        _control_registrar_en_cursor(
+            cur, device_id, 'config_guardada', config,
+            {'origen': 'usuario', 'motivo': 'Configuracion guardada desde el sistema web.',
+             'detalle': {}}, id_usuario=id_usuario)
         cx.commit()
     except Exception:
         if cx is not None:
@@ -484,12 +491,22 @@ def arduino_config():
     if not device_id:
         return jsonify({"error": "Falta device_id"}), 400
 
-    relay = get_relay(device_id)
+    relay, contexto = get_relay(device_id, incluir_contexto=True)
+    # Registra la respuesta preparada, no una confirmacion de recepcion o ejecucion.
+    _control_registrar_respuesta(device_id, relay, contexto)
 
     with wifi_lock:
         wifi = wifi_pendiente.pop(device_id, {"ssid": None, "password": None})
 
-    return jsonify({"relay": relay, "wifi": wifi})
+    respuesta = {"relay": relay, "wifi": wifi}
+    if request.args.get('registro_riego') == '1':
+        # Extension solicitada por el nuevo Mega. El firmware anterior recibe
+        # el mismo contrato de configuracion que antes de esta actualizacion.
+        respuesta['relay'] = dict(relay, config_version=_control_version(relay, contexto))
+        transporte = _eventos_protocolo(device_id, request.args.get('arranque_id'))
+        if transporte is not None:
+            respuesta['riego_eventos'] = transporte
+    return jsonify(respuesta)
 
 
 @app.route('/api/arduino/emparejar', methods=['POST'])
@@ -1737,7 +1754,7 @@ def guardar_config_relevador():
         _relay_cerrar_recursos(cursor, conexion)
 
     try:
-        guardada = set_relay(device_id, config)
+        guardada = set_relay(device_id, config, id_usuario=id_u)
     except ValueError as error:
         return jsonify({"status": "error", "error": str(error)}), 400
     except Exception:
@@ -3118,20 +3135,37 @@ def ciclo_riego_efectivo(device_id):
 def _riego_instalar(n):
     original_get_relay = n['get_relay']
 
-    def get_relay(device_id, incluir_guardada=False):
+    def get_relay(device_id, incluir_guardada=False, incluir_contexto=False):
         config = original_get_relay(device_id)
         guardada = config.copy()
+        contexto = {'origen': 'temporizador',
+                    'motivo': 'Temporizador guardado; sin ciclo por etapa aplicable.',
+                    'detalle': {'config_guardada': guardada}}
         try:
             ciclo = ciclo_riego_efectivo(int(device_id))
         except Exception:
             app.logger.exception('Ciclo por etapa no disponible; se usa el temporizador guardado')
             ciclo = None
+            contexto.update(origen='temporizador_respaldo',
+                            motivo='No se pudo calcular el ciclo por etapa; temporizador guardado.')
         if ciclo:
             # Solo cambian los valores: el JSON que recibe el Mega conserva sus 4 claves.
             config['tiempo_on'], config['tiempo_off'] = ciclo['tiempo_on'], ciclo['tiempo_off']
+            contexto['detalle']['ciclo'] = ciclo
+            ajustado = ciclo.get('ajuste') not in (None, 'sin_ajuste', 'igual_o_menor_que_Y25')
+            contexto.update(
+                origen='etapa_clima' if ajustado else 'etapa',
+                motivo='Ciclo por etapa con ajuste climatico.' if ajustado else
+                       'Ciclo por etapa; sin cambio de tiempos por clima.')
+        if config['modo'] == 'manual':
+            contexto.update(origen='manual',
+                            motivo='Orden manual de ' + config['estado_manual'] +
+                                   '; los tiempos no gobiernan el relevador en este modo.')
         if incluir_guardada:
             # Solo el panel recibe la configuración base; el contrato del Arduino no cambia.
             config['config_guardada'] = guardada
+        if incluir_contexto:
+            return config, contexto
         return config
     n['get_relay'] = get_relay
 
@@ -3161,6 +3195,445 @@ def _riego_instalar(n):
 
 
 _riego_instalar(globals())
+
+
+# =====================================================================
+# ACTIVIDAD 2 - HISTORIAL DE CONFIGURACIONES DE RIEGO - 26/10/2026
+# config_guardada: MySQL confirmo el guardado junto con su evento.
+# config_enviada: configuracion incluida en una respuesta para el Mega.
+# Ninguno confirma recepcion, cambio fisico del relevador ni caudal.
+# No se reconstruyen encendidos a partir del reloj del servidor.
+# Preparacion explicita: python app.py --preparar-control
+# =====================================================================
+SQL_TABLA_CONTROL_RIEGO = '''CREATE TABLE IF NOT EXISTS historial_control_riego (
+ idControl_riego BIGINT NOT NULL AUTO_INCREMENT,
+ idDispositivo INT NOT NULL,
+ idUsuario INT NULL,
+ tipo_evento VARCHAR(24) NOT NULL,
+ config_version CHAR(64) NOT NULL,
+ modo VARCHAR(20) NOT NULL,
+ estado_manual VARCHAR(20) NOT NULL,
+ tiempo_on INT NOT NULL,
+ tiempo_off INT NOT NULL,
+ origen VARCHAR(32) NOT NULL,
+ motivo VARCHAR(255) NOT NULL,
+ detalle_json TEXT NOT NULL,
+ fecha_hora DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ PRIMARY KEY (idControl_riego),
+ KEY idx_control_dispositivo_fecha (idDispositivo,fecha_hora,idControl_riego),
+ KEY idx_control_dispositivo_tipo (idDispositivo,tipo_evento,idControl_riego),
+ CONSTRAINT fk_control_dispositivo FOREIGN KEY (idDispositivo)
+  REFERENCES dispositivos(idDispositivo) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'''
+
+_control_avisos = {}
+_control_avisos_lock = threading.Lock()
+
+
+def _control_avisar(clave, mensaje):
+    """Evita repetir el mismo aviso en cada consulta del Mega."""
+    ahora = time.monotonic()
+    with _control_avisos_lock:
+        anterior = _control_avisos.get(clave)
+        if anterior is not None and ahora - anterior < 300:
+            return
+        _control_avisos[clave] = ahora
+    app.logger.warning(mensaje)
+
+
+def _control_version(config, contexto):
+    """Huella del contenido y su origen, no numero de ciclo ni prueba de aplicacion."""
+    ciclo = contexto.get('detalle', {}).get('ciclo') or {}
+    contenido = {'config': _relay_validar_config(config),
+                 'origen': contexto['origen'],
+                 'cultivo': ciclo.get('cultivo'), 'etapa': ciclo.get('etapa')}
+    texto = json.dumps(contenido, ensure_ascii=False, sort_keys=True,
+                       separators=(',', ':'), allow_nan=False)
+    return hashlib.sha256(texto.encode('utf-8')).hexdigest()
+
+
+def _control_registrar_en_cursor(cursor, device_id, tipo, config, contexto,
+                                id_usuario=None, deduplicar=False):
+    """No hace commit. El llamador conserva el control de la transaccion."""
+    if tipo not in ('config_guardada', 'config_enviada'):
+        raise ValueError('Tipo de evento de control no permitido.')
+    config = _relay_validar_config(config)
+    version = _control_version(config, contexto)
+    # Serializa escrituras del mismo dispositivo incluso con varios workers.
+    cursor.execute('SELECT idDispositivo FROM dispositivos WHERE idDispositivo=%s FOR UPDATE',
+                   (device_id,))
+    if not cursor.fetchone():
+        return None
+    try:
+        if deduplicar:
+            cursor.execute('''SELECT config_version FROM historial_control_riego
+                              WHERE idDispositivo=%s AND tipo_evento=%s
+                              ORDER BY idControl_riego DESC LIMIT 1''', (device_id, tipo))
+            anterior = cursor.fetchone()
+            anterior = (anterior.get('config_version') if isinstance(anterior, dict)
+                        else anterior[0]) if anterior else None
+            if anterior == version:
+                return None
+        detalle = json.dumps(contexto.get('detalle') or {}, ensure_ascii=False,
+                             sort_keys=True, separators=(',', ':'), allow_nan=False)
+        cursor.execute('''INSERT INTO historial_control_riego
+                          (idDispositivo,idUsuario,tipo_evento,config_version,modo,
+                           estado_manual,tiempo_on,tiempo_off,origen,motivo,detalle_json)
+                          VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                       (device_id, id_usuario, tipo, version, config['modo'],
+                        config['estado_manual'], config['tiempo_on'], config['tiempo_off'],
+                        contexto['origen'], contexto['motivo'], detalle))
+        return cursor.lastrowid
+    except mysql.connector.Error as error:
+        if error.errno != 1146:
+            raise
+        # Compatibilidad con instalaciones que aun no preparan la tabla.
+        _control_avisar('tabla_faltante',
+                        'Historial de riego no disponible. Ejecuta python app.py --preparar-control. '
+                        'La configuracion se conserva; este periodo no tendra historial de control.')
+        return None
+
+
+def _control_registrar_respuesta(device_id, config, contexto):
+    """Registra cambios, no las consultas repetidas cada diez segundos."""
+    conexion = cursor = None
+    try:
+        conexion = conectar_bd()
+        cursor = conexion.cursor()
+        _control_registrar_en_cursor(cursor, device_id, 'config_enviada', config,
+                                    contexto, deduplicar=True)
+        conexion.commit()
+    except Exception:
+        if conexion is not None:
+            try:
+                conexion.rollback()
+            except Exception:
+                pass
+        _control_avisar('registro_respuesta',
+                        'No se pudo registrar la configuracion enviada al Mega. '
+                        'Se devuelve la configuracion; el historial puede tener un hueco.')
+    finally:
+        _relay_cerrar_recursos(cursor, conexion)
+
+
+def preparar_bd_control():
+    """Prepara los historiales; conserva lecturas, configuracion y eventos existentes."""
+    conexion = cursor = None
+    try:
+        conexion = conectar_bd()
+        cursor = conexion.cursor()
+        cursor.execute(SQL_TABLA_CONTROL_RIEGO)
+        cursor.execute(SQL_TABLA_EVENTOS_RELEVADOR)
+        conexion.commit()
+    finally:
+        _relay_cerrar_recursos(cursor, conexion)
+
+
+def _control_leer_historial(cursor, device_id, desde, hasta, max_filas):
+    """Incluye la ultima configuracion enviada anterior al intervalo como contexto."""
+    columnas = '''idControl_riego,idDispositivo,idUsuario,tipo_evento,config_version,
+                  modo,estado_manual,tiempo_on,tiempo_off,origen,motivo,detalle_json,fecha_hora'''
+    try:
+        cursor.execute('SELECT ' + columnas + ''' FROM historial_control_riego
+                          WHERE idDispositivo=%s AND fecha_hora>=%s AND fecha_hora<%s
+                          ORDER BY fecha_hora,idControl_riego LIMIT %s''',
+                       (device_id, desde, hasta, max_filas + 1))
+        eventos = cursor.fetchall()
+        if len(eventos) > max_filas:
+            raise _ErrorExportacion('El intervalo supera el limite de eventos de riego. '
+                                    'Divide la consulta en intervalos mas cortos.', 422)
+        cursor.execute('SELECT ' + columnas + ''' FROM historial_control_riego
+                          WHERE idDispositivo=%s AND tipo_evento='config_enviada' AND fecha_hora<%s
+                          ORDER BY fecha_hora DESC,idControl_riego DESC LIMIT 1''',
+                       (device_id, desde))
+        return {'disponible': True, 'eventos': eventos, 'configuracion_previa': cursor.fetchone()}
+    except mysql.connector.Error as error:
+        if error.errno != 1146:
+            raise
+        return {'disponible': False, 'eventos': [], 'configuracion_previa': None}
+
+
+@app.route('/api/riego/historial', methods=['GET'])
+@login_requerido
+def historial_control_riego():
+    try:
+        device_id, desde, hasta = _exportar_validar_filtros(request.args)
+        id_usuario = get_id_usuario()
+        if id_usuario is None:
+            return jsonify(error='La sesion ya no es valida.'), 401
+        with sesion_rangos() as (_, cursor):
+            if not permiso_rangos(cursor, device_id, id_usuario):
+                return jsonify(error='Dispositivo no encontrado o sin permiso.'), 403
+            historial = _control_leer_historial(cursor, device_id, desde, hasta, 5000)
+        if not historial['disponible']:
+            return jsonify(error='Historial no disponible. Ejecuta python app.py --preparar-control.'), 503
+        filas = historial['eventos'] + ([historial['configuracion_previa']]
+                                        if historial['configuracion_previa'] else [])
+        for fila in filas:
+            fila['fecha_hora'] = fila['fecha_hora'].strftime('%Y-%m-%d %H:%M:%S')
+            fila['idControl_riego'] = str(fila['idControl_riego'])
+        return jsonify(dict(historial, device_id=device_id,
+                            alcance='Configuraciones guardadas y respuestas preparadas para el Mega. '
+                                    'No confirma recepcion, estado fisico de la bomba ni volumen suministrado.'))
+    except _ErrorExportacion as error:
+        return jsonify(error=str(error)), error.codigo
+    except Exception:
+        app.logger.exception('No se pudo consultar el historial de control de riego')
+        return jsonify(error='No se pudo consultar el historial. Revisa la conexion con MySQL.'), 500
+
+
+# =====================================================================
+# ACTIVIDAD 2 - EVENTOS INFORMADOS POR EL MEGA - 26/10/2026
+# Se registra la escritura de la salida segun el firmware, no caudal medido.
+# fecha_recepcion pertenece al servidor; uptime_ms al reloj relativo del Mega.
+# =====================================================================
+SQL_TABLA_EVENTOS_RELEVADOR = '''CREATE TABLE IF NOT EXISTS eventos_relevador (
+ idEvento BIGINT NOT NULL AUTO_INCREMENT,
+ idDispositivo INT NOT NULL,
+ arranque_id CHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+ secuencia BIGINT UNSIGNED NOT NULL,
+ tipo_evento VARCHAR(24) NOT NULL,
+ estado_relevador VARCHAR(12) NOT NULL,
+ modo VARCHAR(20) NOT NULL,
+ estado_manual VARCHAR(12) NOT NULL,
+ tiempo_on INT NOT NULL,
+ tiempo_off INT NOT NULL,
+ config_version CHAR(64) NULL,
+ motivo VARCHAR(24) NOT NULL,
+ uptime_ms BIGINT UNSIGNED NOT NULL,
+ duracion_anterior_ms BIGINT UNSIGNED NULL,
+ perdidos_total BIGINT UNSIGNED NOT NULL,
+ firma CHAR(64) NOT NULL,
+ fecha_recepcion DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+ PRIMARY KEY (idEvento),
+ UNIQUE KEY uq_evento_origen (idDispositivo,arranque_id,secuencia),
+ KEY idx_evento_dispositivo_fecha (idDispositivo,fecha_recepcion,idEvento),
+ CONSTRAINT fk_evento_dispositivo FOREIGN KEY (idDispositivo)
+  REFERENCES dispositivos(idDispositivo) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'''
+
+
+class _ErrorEventoRiego(ValueError):
+    def __init__(self, mensaje, codigo=400):
+        super().__init__(mensaje)
+        self.codigo = codigo
+
+
+def _eventos_protocolo(device_id, arranque_id):
+    """Anuncia el protocolo solo si el dispositivo y su tabla estan disponibles.
+
+    La primera respuesta asigna una sesion aleatoria. El Mega la conserva en
+    RAM y la devuelve en las consultas siguientes; cada reinicio pide otra.
+    """
+    import re
+    import uuid
+    if arranque_id is not None and (not isinstance(arranque_id, str)
+                                    or not re.fullmatch('[0-9a-f]{32}', arranque_id)):
+        return None
+    conexion = cursor = None
+    try:
+        conexion = conectar_bd()
+        cursor = conexion.cursor()
+        cursor.execute('SELECT idDispositivo FROM dispositivos WHERE idDispositivo=%s',
+                       (device_id,))
+        if not cursor.fetchone():
+            return None
+        # Solo comprueba disponibilidad. Las tablas se crean con el comando
+        # --preparar-control, nunca como efecto de una consulta del hardware.
+        cursor.execute('SELECT idEvento FROM eventos_relevador LIMIT 0')
+        cursor.fetchall()
+        return dict(protocolo=1, arranque_id=arranque_id or uuid.uuid4().hex)
+    except Exception:
+        _control_avisar('protocolo_eventos',
+                        'Receptor de eventos no disponible. Ejecuta python app.py --preparar-control '
+                        'y verifica MySQL. Se conserva la respuesta habitual de riego.')
+        return None
+    finally:
+        _relay_cerrar_recursos(cursor, conexion)
+
+
+def _eventos_validar(data):
+    """No acepta booleanos como enteros ni usa horas del PC como horas del Mega."""
+    import re
+
+    def entero(objeto, campo, minimo=0, maximo=4294967295):
+        valor = objeto.get(campo)
+        if type(valor) is not int or not minimo <= valor <= maximo:
+            raise _ErrorEventoRiego('Campo entero no valido: ' + campo)
+        return valor
+
+    if set(data) != {'token', 'device_id', 'arranque_id', 'evento'}:
+        raise _ErrorEventoRiego('El mensaje no tiene los campos esperados.')
+    device_id = entero(data, 'device_id', 1, 2147483647)
+    arranque = data.get('arranque_id')
+    if not isinstance(arranque, str) or not re.fullmatch('[0-9a-f]{32}', arranque):
+        raise _ErrorEventoRiego('Identificador de arranque no valido.')
+    e = data.get('evento')
+    campos = {'secuencia', 'tipo_evento', 'estado_relevador', 'modo', 'estado_manual',
+              'tiempo_on', 'tiempo_off', 'config_version', 'motivo', 'uptime_ms',
+              'duracion_anterior_ms', 'perdidos_total'}
+    if not isinstance(e, dict) or set(e) != campos:
+        raise _ErrorEventoRiego('El evento no tiene los campos esperados.')
+    e = dict(e)
+    entero(e, 'secuencia', 1)
+    entero(e, 'uptime_ms')
+    entero(e, 'perdidos_total')
+    if e['tipo_evento'] not in ('inicio', 'config_aplicada', 'relevador_on', 'relevador_off',
+                              'bloqueo_nivel', 'recuperacion_nivel'):
+        raise _ErrorEventoRiego('Tipo de evento no valido.')
+    if e['estado_relevador'] not in ('encendido', 'apagado'):
+        raise _ErrorEventoRiego('Estado de relevador no valido.')
+    if e['modo'] not in ('manual', 'automatico', 'espera'):
+        raise _ErrorEventoRiego('Modo de evento no valido.')
+    if e['estado_manual'] not in ('encendido', 'apagado'):
+        raise _ErrorEventoRiego('Orden manual no valida.')
+    if e['motivo'] not in ('arranque', 'configuracion', 'manual', 'ciclo_automatico',
+                            'calibracion_ec', 'sin_configuracion', 'nivel_sin_lectura',
+                            'nivel_bajo', 'nivel_invalido', 'nivel_vencido', 'nivel_recuperado'):
+        raise _ErrorEventoRiego('Motivo de evento no valido.')
+    minimo = 0 if e['modo'] == 'espera' else 1
+    entero(e, 'tiempo_on', minimo, 3600)
+    entero(e, 'tiempo_off', minimo, 3600)
+    version = e['config_version']
+    if version is not None and (not isinstance(version, str) or not re.fullmatch('[0-9a-f]{64}', version)):
+        raise _ErrorEventoRiego('Version de configuracion no valida.')
+    if e['modo'] == 'espera' and (version is not None or e['estado_relevador'] != 'apagado'):
+        raise _ErrorEventoRiego('Un evento en espera debe estar apagado y sin version aplicada.')
+    if e['modo'] == 'espera' and (e['tiempo_on'] != 0 or e['tiempo_off'] != 0):
+        raise _ErrorEventoRiego('Un evento en espera no tiene tiempos de riego aceptados.')
+    if e['tipo_evento'] in ('relevador_on', 'relevador_off'):
+        esperado = 'encendido' if e['tipo_evento'] == 'relevador_on' else 'apagado'
+        if e['estado_relevador'] != esperado:
+            raise _ErrorEventoRiego('El estado no coincide con el cambio informado.')
+        entero(e, 'duracion_anterior_ms')
+    elif e['duracion_anterior_ms'] is not None:
+        raise _ErrorEventoRiego('Solo los cambios de salida incluyen duracion anterior.')
+    if e['tipo_evento'] == 'inicio' and (e['estado_relevador'] != 'apagado' or e['modo'] != 'espera'
+                                         or e['motivo'] != 'arranque' or e['secuencia'] != 1
+                                         or e['estado_manual'] != 'apagado'):
+        raise _ErrorEventoRiego('El evento de inicio no es coherente.')
+    if e['tipo_evento'] == 'config_aplicada' and (e['modo'] == 'espera' or e['motivo'] != 'configuracion'):
+        raise _ErrorEventoRiego('La confirmacion no incluye una configuracion aceptada.')
+    motivos_bloqueo = ('nivel_sin_lectura', 'nivel_bajo', 'nivel_invalido', 'nivel_vencido')
+    if e['tipo_evento'] == 'bloqueo_nivel' and (e['estado_relevador'] != 'apagado'
+                                               or e['motivo'] not in motivos_bloqueo):
+        raise _ErrorEventoRiego('El bloqueo de nivel debe informar salida apagada y su motivo.')
+    if e['tipo_evento'] == 'recuperacion_nivel' and (e['estado_relevador'] != 'apagado'
+                                                    or e['motivo'] != 'nivel_recuperado'):
+        raise _ErrorEventoRiego('La recuperacion debe preceder a cualquier nuevo encendido.')
+    if e['motivo'] in motivos_bloqueo and e['tipo_evento'] not in ('bloqueo_nivel', 'relevador_off'):
+        raise _ErrorEventoRiego('Un motivo de bloqueo no puede ordenar encendido.')
+    if e['motivo'] == 'nivel_recuperado' and e['tipo_evento'] != 'recuperacion_nivel':
+        raise _ErrorEventoRiego('El motivo de recuperacion requiere su aviso de nivel.')
+    firma = hashlib.sha256(json.dumps(e, sort_keys=True, separators=(',', ':'),
+                                     ensure_ascii=False, allow_nan=False).encode('utf-8')).hexdigest()
+    return device_id, arranque, e, firma
+
+
+@app.route('/api/arduino/riego/evento', methods=['POST'])
+def arduino_evento_riego():
+    if request.content_length is not None and request.content_length > 4096:
+        return jsonify(error='Evento demasiado grande.'), 413
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(error='Se requiere un objeto JSON.'), 400
+    if data.get('token') != ARDUINO_TOKEN:
+        return jsonify(error='No autorizado'), 401
+    conexion = cursor = None
+    try:
+        device_id, arranque, evento, firma = _eventos_validar(data)
+        conexion = conectar_bd()
+        cursor = conexion.cursor(dictionary=True)
+        # Mismo bloqueo por dispositivo que usa el historial de configuraciones.
+        cursor.execute('SELECT idDispositivo FROM dispositivos WHERE idDispositivo=%s FOR UPDATE',
+                       (device_id,))
+        if not cursor.fetchone():
+            raise _ErrorEventoRiego('Dispositivo no encontrado.', 404)
+        cursor.execute('''SELECT idEvento,firma FROM eventos_relevador
+                          WHERE idDispositivo=%s AND arranque_id=%s AND secuencia=%s''',
+                       (device_id, arranque, evento['secuencia']))
+        anterior = cursor.fetchone()
+        if anterior and anterior['firma'] != firma:
+            raise _ErrorEventoRiego('Identificador de evento reutilizado con otro contenido.', 409)
+        if not anterior:
+            campos = ('secuencia', 'tipo_evento', 'estado_relevador', 'modo', 'estado_manual',
+                      'tiempo_on', 'tiempo_off', 'config_version', 'motivo', 'uptime_ms',
+                      'duracion_anterior_ms', 'perdidos_total')
+            cursor.execute('''INSERT INTO eventos_relevador
+                              (idDispositivo,arranque_id,secuencia,tipo_evento,estado_relevador,
+                               modo,estado_manual,tiempo_on,tiempo_off,config_version,motivo,
+                               uptime_ms,duracion_anterior_ms,perdidos_total,firma)
+                              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                           (device_id, arranque) + tuple(evento[c] for c in campos) + (firma,))
+        # Solo confirma despues del commit: si el ACK se pierde, el reintento no duplica la fila.
+        conexion.commit()
+        return jsonify(status='ok', arranque_id=arranque, secuencia=evento['secuencia'],
+                       duplicado=bool(anterior))
+    except _ErrorEventoRiego as error:
+        if conexion is not None:
+            conexion.rollback()
+        return jsonify(error=str(error)), error.codigo
+    except mysql.connector.Error as error:
+        if conexion is not None:
+            conexion.rollback()
+        if error.errno == 1146:
+            return jsonify(error='Prepara las tablas con python app.py --preparar-control.'), 503
+        app.logger.exception('No se pudo guardar el evento de riego')
+        return jsonify(error='No se pudo guardar el evento de riego.'), 503
+    except Exception:
+        if conexion is not None:
+            conexion.rollback()
+        app.logger.exception('No se pudo procesar el evento de riego')
+        return jsonify(error='No se pudo procesar el evento de riego.'), 500
+    finally:
+        _relay_cerrar_recursos(cursor, conexion)
+
+
+def _eventos_leer(cursor, device_id, desde, hasta, max_filas):
+    try:
+        cursor.execute('''SELECT idEvento,idDispositivo,arranque_id,secuencia,tipo_evento,
+                                 estado_relevador,modo,estado_manual,tiempo_on,tiempo_off,
+                                 config_version,motivo,uptime_ms,duracion_anterior_ms,
+                                 perdidos_total,fecha_recepcion
+                          FROM eventos_relevador
+                          WHERE idDispositivo=%s AND fecha_recepcion>=%s AND fecha_recepcion<%s
+                          ORDER BY fecha_recepcion,idEvento LIMIT %s''',
+                       (device_id, desde, hasta, max_filas + 1))
+        eventos = cursor.fetchall()
+        if len(eventos) > max_filas:
+            raise _ErrorExportacion('El intervalo supera el limite de eventos del relevador.', 422)
+        return dict(disponible=True, eventos=eventos)
+    except mysql.connector.Error as error:
+        if error.errno != 1146:
+            raise
+        return dict(disponible=False, eventos=[])
+
+
+@app.route('/api/riego/eventos', methods=['GET'])
+@login_requerido
+def consultar_eventos_riego():
+    try:
+        device_id, desde, hasta = _exportar_validar_filtros(request.args)
+        usuario = get_id_usuario()
+        if usuario is None:
+            return jsonify(error='La sesion ya no es valida.'), 401
+        with sesion_rangos() as (_, cursor):
+            if not permiso_rangos(cursor, device_id, usuario):
+                return jsonify(error='Dispositivo no encontrado o sin permiso.'), 403
+            datos = _eventos_leer(cursor, device_id, desde, hasta, 5000)
+        if not datos['disponible']:
+            return jsonify(error='Ejecuta python app.py --preparar-control.'), 503
+        for evento in datos['eventos']:
+            evento['fecha_recepcion'] = evento['fecha_recepcion'].isoformat(sep=' ', timespec='milliseconds')
+            evento['idEvento'] = str(evento['idEvento'])
+        return jsonify(device_id=device_id, eventos=datos['eventos'],
+                       alcance='Salida informada por el firmware. No mide caudal ni volumen. '
+                               'fecha_recepcion es hora del servidor; uptime_ms es el reloj relativo del Mega.')
+    except _ErrorExportacion as error:
+        return jsonify(error=str(error)), error.codigo
+    except Exception:
+        app.logger.exception('No se pudieron consultar eventos de riego')
+        return jsonify(error='No se pudieron consultar eventos de riego.'), 500
 
 
 # =====================================================================
@@ -3267,12 +3740,18 @@ def _exportar_leer_datos(device_id, desde, hasta):
             diagnosticos = cursor.fetchall()
             if len(diagnosticos) > EXPORTACION_MAX_FILAS:
                 raise _ErrorExportacion('El intervalo supera 50 000 diagnósticos. Divídelo en intervalos más cortos.', 422)
-        if not lecturas and not diagnosticos:
+        control = _control_leer_historial(cursor, device_id, desde, hasta, EXPORTACION_MAX_FILAS)
+        if len(control['eventos']) + bool(control['configuracion_previa']) > EXPORTACION_MAX_FILAS:
+            raise _ErrorExportacion('El intervalo y su referencia previa superan 50 000 filas de control. '
+                                    'Dividelo en intervalos mas cortos.', 422)
+        eventos_relevador = _eventos_leer(cursor, device_id, desde, hasta, EXPORTACION_MAX_FILAS)
+        if not lecturas and not diagnosticos and not control['eventos'] and not eventos_relevador['eventos']:
             detalle = '' if diagnosticos_disponibles else ' La tabla de diagnósticos de agua no está disponible.'
             raise _ErrorExportacion('No hay registros disponibles para ese dispositivo e intervalo.' + detalle, 404)
         return dict(dispositivo=dispositivo, desde=desde, hasta=hasta, relojes=relojes,
                     lecturas=lecturas, diagnosticos=diagnosticos,
-                    diagnosticos_disponibles=diagnosticos_disponibles)
+                    diagnosticos_disponibles=diagnosticos_disponibles, control=control,
+                    eventos_relevador=eventos_relevador)
     finally:
         # Termina la instantánea y libera ambos recursos incluso si uno falla.
         if conexion is not None:
@@ -3334,14 +3813,20 @@ def _exportar_generar_excel(datos):
         for numero_fila, fila in enumerate(filas, 2):
             celdas = [celda(hoja, fila.get(clave), clave.startswith('id'))
                       for clave, _, _ in columnas]
-            if nombre == 'Informacion':
+            if nombre in ('Informacion', 'Control_riego', 'Eventos_relevador'):
                 for c in celdas:
                     c.alignment = Alignment(vertical='top', wrap_text=True)
-                hoja.row_dimensions[numero_fila].height = 44
+                hoja.row_dimensions[numero_fila].height = 90 if nombre in ('Control_riego', 'Eventos_relevador') else 44
+            if nombre == 'Eventos_relevador':
+                for c in celdas:
+                    if isinstance(c.value, datetime):
+                        c.number_format = 'yyyy-mm-dd hh:mm:ss.000'
             hoja.append(celdas)
         return hoja
 
     relojes, dispositivo = datos['relojes'], datos['dispositivo']
+    control = datos['control']
+    eventos_relevador = datos.get('eventos_relevador', dict(disponible=False, eventos=[]))
     informacion = [
         ('Dispositivo ID', str(dispositivo['idDispositivo'])),
         ('Nombre del dispositivo', dispositivo['nombre']),
@@ -3351,6 +3836,33 @@ def _exportar_generar_excel(datos):
         ('Filas en Diagnosticos_agua', len(datos['diagnosticos'])),
         ('Tabla de diagnósticos', 'Disponible' if datos['diagnosticos_disponibles'] else
          'No disponible. La hoja vacía no demuestra ausencia de fallos.'),
+        ('Eventos de control dentro del intervalo', len(control['eventos'])),
+        ('Eventos del relevador recibidos dentro del intervalo', len(eventos_relevador['eventos'])),
+        ('Tabla de eventos del relevador', 'Disponible' if eventos_relevador['disponible'] else
+         'No disponible. Ejecuta python app.py --preparar-control.'),
+        ('Eventos_relevador', 'El Mega informa inicio, configuracion aceptada y cambios de su salida. '
+         'No comprueba contactos del relevador, caudal ni volumen. El intervalo se filtra por '
+         'fecha de recepcion; no se deduce el estado de la bomba al inicio del intervalo.'),
+        ('Reloj del Mega', 'uptime_ms son milisegundos desde el arranque (se repite cada 49.7 dias). '
+         'No es una fecha. La duracion anterior corresponde al estado de salida anterior y solo '
+         'se informa en cambios ON/OFF. No se calcula restando fechas de recepcion.'),
+        ('Continuidad de eventos', 'arranque_id distingue reinicios; secuencia identifica cada aviso. '
+         'La cola del Mega conserva hasta 8 avisos en RAM. perdidos_total cuenta descartes por '
+         'cola llena en ese arranque, informados en un aviso posterior. Un reinicio pierde los '
+         'avisos pendientes: un contador de perdidas en cero no garantiza historial completo.'),
+        ('Recepcion de eventos', 'fecha_recepcion es la hora de MySQL al guardar por primera vez. '
+         'Puede ser posterior al cambio de salida si hubo una interrupcion de red. Los reintentos '
+         'confirmados no duplican filas ni cambian esta fecha.'),
+        ('Referencia de control anterior al intervalo',
+         'Incluida, marcada con 1 en Referencia previa.' if control['configuracion_previa'] else
+         'Sin registro previo disponible. No se deduce un estado inicial de la bomba.'),
+        ('Tabla de control de riego', 'Disponible' if control['disponible'] else
+         'No disponible. Ejecuta python app.py --preparar-control; no existe historial retroactivo.'),
+        ('Control de riego', 'config_guardada: guardado confirmado en MySQL. config_enviada: '
+         'respuesta preparada para el Mega. No confirman recepcion ni ejecucion. '
+         'Solo se registran cambios de configuracion enviada, no cada consulta.'),
+        ('Version de configuracion', 'Huella SHA-256 de los tiempos, modo, orden manual, origen, '
+         'cultivo y etapa. Identifica el contenido; no demuestra que el Mega lo aplico.'),
         ('Hora de MySQL al exportar', relojes['hora_mysql']),
         ('Hora UTC de MySQL al exportar', relojes['hora_utc_mysql']),
         ('Hora de Flask al exportar', relojes['hora_flask']),
@@ -3387,6 +3899,44 @@ def _exportar_generar_excel(datos):
         ('valor_registrado', 'Valor asociado', 20), ('unidad_medida', 'Unidad registrada', 22),
         ('fecha_hora_lectura', 'Fecha y hora de la lectura', 29),
     ], datos['diagnosticos'])
+    filas_control = []
+    if control['configuracion_previa']:
+        filas_control.append(dict(control['configuracion_previa'], referencia_previa=1))
+    filas_control.extend(dict(fila, referencia_previa=0) for fila in control['eventos'])
+    hoja_datos('Control_riego', [
+        ('idControl_riego', 'idControl_riego', 24),
+        ('idDispositivo', 'idDispositivo', 18),
+        ('tipo_evento', 'Tipo de evento', 24),
+        ('fecha_hora', 'Fecha y hora del servidor', 26),
+        ('modo', 'Modo solicitado', 20),
+        ('tiempo_on', 'Tiempo ON configurado (s)', 24),
+        ('tiempo_off', 'Tiempo OFF configurado (s)', 24),
+        ('estado_manual', 'Orden manual (solo modo manual)', 25),
+        ('origen', 'Origen', 24),
+        ('motivo', 'Motivo', 64),
+        ('config_version', 'Version de configuracion (SHA-256)', 70),
+        ('idUsuario', 'Usuario que guardo', 22),
+        ('referencia_previa', 'Referencia previa al intervalo (1/0)', 25),
+        ('detalle_json', 'Detalle de configuracion y calculo (JSON)', 85),
+    ], filas_control)
+    hoja_datos('Eventos_relevador', [
+        ('idEvento', 'idEvento', 22),
+        ('idDispositivo', 'idDispositivo', 18),
+        ('arranque_id', 'Identificador de arranque', 38),
+        ('secuencia', 'Secuencia en el arranque', 23),
+        ('tipo_evento', 'Tipo de evento', 25),
+        ('fecha_recepcion', 'Fecha y hora de recepcion (servidor)', 32),
+        ('uptime_ms', 'Tiempo desde arranque (ms)', 27),
+        ('duracion_anterior_ms', 'Duracion del estado anterior (ms)', 30),
+        ('estado_relevador', 'Salida informada por el Mega', 28),
+        ('modo', 'Modo de la configuracion aceptada', 30),
+        ('tiempo_on', 'Tiempo ON configurado (s)', 24),
+        ('tiempo_off', 'Tiempo OFF configurado (s)', 24),
+        ('estado_manual', 'Orden manual (solo modo manual)', 28),
+        ('motivo', 'Motivo del aviso', 27),
+        ('config_version', 'Version de configuracion (SHA-256)', 70),
+        ('perdidos_total', 'Avisos descartados en este arranque', 32),
+    ], eventos_relevador['eventos'])
     archivo = BytesIO()
     libro.save(archivo)
     archivo.seek(0)
@@ -3532,7 +4082,11 @@ if __name__ == '__main__':
     parser=argparse.ArgumentParser(description='Servidor AeroGarden')
     parser.add_argument('--preparar-agua',action='store_true',
                         help='Crear la tabla adicional de sensores de agua y salir')
+    parser.add_argument('--preparar-control',action='store_true',
+                        help='Crear las tablas de configuraciones y eventos del relevador y salir')
     argumentos=parser.parse_args()
+    if argumentos.preparar_agua and argumentos.preparar_control:
+        parser.error('Prepara cada tabla por separado: --preparar-agua o --preparar-control.')
     if argumentos.preparar_agua:
         try:
             preparar_bd_agua()
@@ -3540,9 +4094,20 @@ if __name__ == '__main__':
             print('No se pudo preparar la tabla de agua:',error)
             raise SystemExit(1)
         print('Tabla mediciones_agua lista. Los sensores y las lecturas existentes se conservan.')
+    elif argumentos.preparar_control:
+        try:
+            preparar_bd_control()
+        except Exception as error:
+            print('No se pudo preparar el historial de control:', error)
+            raise SystemExit(1)
+        print('Tablas historial_control_riego y eventos_relevador listas. '
+              'El registro empieza con las nuevas operaciones. '
+              'Las lecturas y la configuracion existentes se conservan.')
     else:
         app.run(
             debug=os.environ.get('FLASK_DEBUG', 'False') == 'True',
             host='0.0.0.0',
             port=int(os.environ.get('PORT', 5000))
         )
+
+

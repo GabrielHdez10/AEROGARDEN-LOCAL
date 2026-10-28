@@ -764,6 +764,51 @@
         @media (max-width: 600px) {
             .exportacion-excel-accion { width: 100%; }
         }
+        /* Actividad 2: consulta de configuraciones y avisos del Mega. */
+        .riego-registro { margin-top: 16px; }
+        .riego-registro [hidden] { display: none !important; }
+        .riego-registro h2 { font-size: 21px; color: #1a3d2b; margin: 0 0 7px; }
+        .riego-registro h3 { font-size: 16px; margin: 0; color: #1a3d2b; }
+        .riego-registro p { font-size: 13px; line-height: 1.6; color: #526b5c; }
+        .riego-cabecera { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+        .riego-enlace { color: #216b50; font-size: 13px; font-weight: 600; white-space: nowrap; padding: 7px 0; }
+        .riego-filtros { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; margin: 18px 0 8px; }
+        .riego-filtros > label { flex: 1 1 210px; font-size: 13px; font-weight: 600; }
+        .riego-filtros input { margin: 6px 0 0; min-width: 0; }
+        .riego-registro button { font-size: 13px; margin: 0; }
+        .riego-registro button:focus-visible, .riego-registro summary:focus-visible,
+        .riego-registro a:focus-visible { outline: 3px solid #52b788; outline-offset: 3px; }
+        .riego-opciones { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+        .riego-opciones label { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: #526b5c; }
+        .riego-opciones input[type="checkbox"] { width: auto; margin: 0; }
+        .riego-resumen { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+        .riego-resumen > div { border: 1px solid #d9e7de; border-radius: 10px; padding: 14px; background: #f7fbf8; min-width: 0; }
+        .riego-resumen small { display: block; color: #526b5c; font-size: 12px; margin-bottom: 7px; }
+        .riego-resumen strong { display: block; font-size: 18px; color: #1a3d2b; margin-bottom: 7px; overflow-wrap: anywhere; }
+        .riego-resumen p { margin: 0; overflow-wrap: anywhere; }
+        .riego-registro .riego-aviso { background: #fff7e5; color: #755313; border: 1px solid #efd49c; border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; }
+        .riego-lista-cabecera { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin: 16px 0 9px; }
+        .riego-conteo { font-size: 12px; color: #526b5c; }
+        .riego-tabla-wrap { overflow-x: auto; border: 1px solid #d9e7de; border-radius: 9px; max-width: 100%; }
+        .riego-registro table { margin: 0; width: 100%; min-width: 760px; border-collapse: collapse; }
+        .riego-registro th { text-align: left; padding: 11px; letter-spacing: 0; text-transform: none; font-size: 12px; }
+        .riego-registro td { text-align: left; padding: 11px; font-size: 12px; vertical-align: top; border-bottom: 1px solid #e2ece5; }
+        .riego-registro tr:last-child td { border-bottom: 0; }
+        .riego-registro details summary { cursor: pointer; color: #216b50; font-weight: 600; font-size: 13px; }
+        .riego-registro td details { max-width: 270px; min-width: 130px; }
+        .riego-registro td details p { margin-top: 6px; font-size: 12px; overflow-wrap: anywhere; }
+        .riego-registro .riego-configuraciones { border-top: 1px solid #d9e7de; margin-top: 18px; padding-top: 14px; }
+        .riego-registro .riego-configuraciones > summary { font-size: 16px; color: #1a3d2b; }
+        .riego-paginacion { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: #526b5c; }
+        .riego-registro .riego-error { color: #b42318; }
+        .riego-registro .riego-vacio { padding: 14px 0; }
+        .riego-tipo { font-weight: 600; color: #216b50; }
+        @media (max-width: 650px) {
+            .riego-resumen { grid-template-columns: minmax(0, 1fr); }
+            .riego-filtros > label, .riego-filtros > button { flex-basis: 100%; }
+            .riego-filtros input { width: 100%; }
+            .riego-paginacion { justify-content: flex-start; }
+        }
 </style>
 </head>
 <body>
@@ -1166,6 +1211,77 @@
     </div>
 
     
+    <section class="card riego-registro" id="riego-registro" aria-labelledby="riego-registro-titulo">
+        <div class="riego-cabecera">
+            <div>
+                <h2 id="riego-registro-titulo">Historial de riego</h2>
+                <p>Consulta las configuraciones del servidor y los avisos que envió el Mega del dispositivo seleccionado.</p>
+            </div>
+            <a class="riego-enlace" href="{{ request.script_root }}/exportar" target="_blank" rel="noopener">Exportar historial a Excel ↗</a>
+        </div>
+        <form id="riego-filtros" class="riego-filtros">
+            <label for="riego-desde">Desde
+                <input id="riego-desde" type="datetime-local" step="60" required>
+            </label>
+            <label for="riego-hasta">Hasta
+                <input id="riego-hasta" type="datetime-local" step="60" required>
+            </label>
+            <button class="btn-verde" type="submit" id="riego-consultar">Consultar historial</button>
+        </form>
+        <div class="riego-opciones">
+            <p>Fechas y horas originales del servidor. La fecha final no se incluye.</p>
+            <label><input type="checkbox" id="riego-auto" checked>Actualizar cada 10 s</label>
+        </div>
+        <p id="riego-rango">Selecciona un dispositivo y consulta un intervalo.</p>
+        <p id="riego-consulta-status" role="status" aria-live="polite"></p>
+        <div class="riego-resumen">
+            <div>
+                <small>Última salida informada en el intervalo</small>
+                <strong id="riego-ultima-salida">Sin consultar</strong>
+                <p id="riego-ultimo-aviso">La consulta mostrará la fecha de recepción del último aviso disponible.</p>
+            </div>
+            <div>
+                <small>Última configuración registrada</small>
+                <strong id="riego-ultima-config">Sin consultar</strong>
+                <p id="riego-ultima-config-fecha">Una configuración guardada o preparada no confirma su ejecución.</p>
+            </div>
+        </div>
+        <p>Los avisos describen la salida que informó el programa del Mega en ese momento.
+            No verifican el estado actual ni el paso de agua. La ausencia de eventos puede corresponder a un ciclo sin cambios o a falta de reportes.</p>
+        <p class="riego-aviso" id="riego-perdidas" hidden>Hay avisos con descartes declarados por el Mega. Revisa los detalles o exporta el historial; sus contadores son acumulados desde cada arranque.</p>
+        <div class="riego-lista-cabecera">
+            <h3>Avisos del Mega</h3><span class="riego-conteo" id="riego-eventos-conteo">—</span>
+        </div>
+        <p class="riego-vacio" id="riego-eventos-estado">Aún no se ha consultado el historial.</p>
+        <div class="riego-tabla-wrap" id="riego-eventos-wrap" role="region" aria-label="Historial de avisos del Mega" tabindex="0" hidden>
+            <table>
+                <thead><tr><th scope="col">Recepción en servidor</th><th scope="col">Aviso</th><th scope="col">Salida informada</th><th scope="col">Modo</th><th scope="col">Motivo</th><th scope="col">Configuración y duración</th></tr></thead>
+                <tbody id="riego-eventos-filas"></tbody>
+            </table>
+        </div>
+        <div class="riego-paginacion" id="riego-eventos-paginacion" hidden>
+            <button type="button" id="riego-eventos-anterior" aria-label="Página anterior de avisos">Anterior</button>
+            <span id="riego-eventos-pagina"></span>
+            <button type="button" id="riego-eventos-siguiente" aria-label="Página siguiente de avisos">Siguiente</button>
+        </div>
+        <details class="riego-configuraciones">
+            <summary>Configuraciones del servidor · <span class="riego-conteo" id="riego-config-conteo">—</span></summary>
+            <p>«Preparada para Mega» indica que el servidor preparó una respuesta. La aceptación se registra por separado como un aviso del Mega.</p>
+            <p class="riego-vacio" id="riego-config-estado">Aún no se ha consultado el historial.</p>
+            <div class="riego-tabla-wrap" id="riego-config-wrap" role="region" aria-label="Historial de configuraciones del servidor" tabindex="0" hidden>
+                <table>
+                    <thead><tr><th scope="col">Fecha del servidor</th><th scope="col">Registro</th><th scope="col">Modo</th><th scope="col">ON / OFF</th><th scope="col">Origen y motivo</th><th scope="col">Detalle</th></tr></thead>
+                    <tbody id="riego-config-filas"></tbody>
+                </table>
+            </div>
+            <div class="riego-paginacion" id="riego-config-paginacion" hidden>
+                <button type="button" id="riego-config-anterior" aria-label="Página anterior de configuraciones">Anterior</button>
+                <span id="riego-config-pagina"></span>
+                <button type="button" id="riego-config-siguiente" aria-label="Página siguiente de configuraciones">Siguiente</button>
+            </div>
+        </details>
+    </section>
+
     <div class="card" style="margin-top:16px;">
         <h3 style="margin-bottom:10px; color:#2c3e50;" data-i18n="bomba_nivel">📏 Nivel de Agua (Sensor Ultrasónico)</h3>
         <div id="display-nivel-agua" style="font-size:36px; font-weight:700; color:#2980b9;">— cm</div>
@@ -1919,6 +2035,7 @@ async function cargarSeccionRelevador() {
         bombaMostrarMensaje('Selecciona un dispositivo primero.', true);
         return false;
     }
+    void cargarHistorialRiego(true);
     const sel = document.getElementById('select-bomba-dispositivo');
     if (sel) sel.value = String(deviceId);
     if (bombaConfigConfirmada?.deviceId !== deviceId) ID_SENSOR_NIVEL = null;
@@ -2120,6 +2237,316 @@ function actualizarUnidadSegunTipo() {
         unidad.value = mapa[tipo];
     }
 }
+</script>
+<script id="script-registro-riego">
+// ACTIVIDAD 2: estas consultas solo leen datos. Las ordenes de la bomba siguen
+// usando bombaEnviarConfiguracion(). Las fechas del servidor se muestran sin
+// convertirlas a la zona del navegador y nunca se deduce una conexion por edad.
+const riegoHistorial = {
+    revision: 0, controlador: null, dispositivo: null, filtros: null,
+    fuentes: {eventos: null, config: null}, paginas: {eventos: 0, config: 0},
+    renderizados: {eventos: null, config: null}
+};
+const RIEGO_FILAS_PAGINA = 25;
+const riegoNodo = id => document.getElementById('riego-' + id);
+const riegoEtiquetas = Object.freeze({
+    inicio: 'Arranque', config_aplicada: 'Configuración aceptada',
+    relevador_on: 'Salida encendida', relevador_off: 'Salida apagada',
+    config_guardada: 'Guardada en servidor', config_enviada: 'Preparada para Mega',
+    manual: 'Manual', automatico: 'Automático', espera: 'En espera',
+    arranque: 'Arranque', configuracion: 'Cambio de configuración',
+    ciclo_automatico: 'Ciclo automático', calibracion_ec: 'Calibración de CE',
+    sin_configuracion: 'Sin configuración válida',
+    bloqueo_nivel: 'Bloqueo por nivel', recuperacion_nivel: 'Protección de nivel recuperada',
+    nivel_sin_lectura: 'Nivel pendiente de validar', nivel_bajo: 'Nivel de agua bajo',
+    nivel_invalido: 'Lectura de nivel no válida', nivel_vencido: 'Lectura de nivel vencida',
+    nivel_recuperado: 'Nivel recuperado; vuelve el control normal'
+});
+
+function riegoDispositivo() {
+    const valor = typeof dispositivoActualId === 'undefined' ? null : dispositivoActualId;
+    const id = Number(valor);
+    return Number.isInteger(id) && id > 0 && id <= 2147483647 ? id : null;
+}
+
+function riegoFechaLocal(fecha) {
+    const dos = n => String(n).padStart(2, '0');
+    return `${fecha.getFullYear()}-${dos(fecha.getMonth() + 1)}-${dos(fecha.getDate())}T${dos(fecha.getHours())}:${dos(fecha.getMinutes())}`;
+}
+
+function riegoValidarFechas(desde, hasta) {
+    function fechaValida(texto) {
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(texto)) return false;
+        const partes = texto.match(/\d+/g).map(Number);
+        const [ano, mes, dia, hora, minuto] = partes;
+        const fecha = new Date(Date.UTC(ano, mes - 1, dia, hora, minuto));
+        return ano >= 1900 && fecha.getUTCFullYear() === ano && fecha.getUTCMonth() === mes - 1 &&
+            fecha.getUTCDate() === dia && fecha.getUTCHours() === hora && fecha.getUTCMinutes() === minuto;
+    }
+    if (!fechaValida(desde) || !fechaValida(hasta)) throw new Error('Indica dos fechas y horas válidas.');
+    if (desde >= hasta) throw new Error('La fecha final debe ser posterior a la inicial.');
+    return {desde, hasta};
+}
+
+function riegoTexto(id, texto) { riegoNodo(id).textContent = texto; }
+function riegoEtiqueta(valor) { return riegoEtiquetas[valor] || String(valor || 'Sin dato'); }
+function riegoSalida(valor) {
+    return valor === 'encendido' ? 'Encendido' : valor === 'apagado' ? 'Apagado' : 'Sin estado informado';
+}
+function riegoDuracion(valor) {
+    return Number.isInteger(valor) && valor >= 0 ? (valor < 1000 ? valor + ' ms' :
+        (valor / 1000).toLocaleString('es-MX', {maximumFractionDigits: 3}) + ' s') : 'No corresponde';
+}
+
+function riegoInvalidarHistorial() {
+    ++riegoHistorial.revision;
+    if (riegoHistorial.controlador) riegoHistorial.controlador.abort();
+    riegoHistorial.controlador = null;
+    riegoHistorial.dispositivo = riegoDispositivo();
+    riegoHistorial.filtros = null;
+    riegoHistorial.fuentes = {eventos: null, config: null};
+    riegoHistorial.paginas = {eventos: 0, config: 0};
+    riegoHistorial.renderizados = {eventos: null, config: null};
+    riegoNodo('consultar').disabled = false;
+    riegoNodo('perdidas').hidden = true;
+    riegoTexto('rango', 'Selecciona un intervalo para el dispositivo ' + (riegoHistorial.dispositivo || 'disponible') + '.');
+    riegoTexto('consulta-status', '');
+    riegoTexto('ultima-salida', 'Sin consultar');
+    riegoTexto('ultimo-aviso', 'Se mostrará el último aviso recibido dentro del intervalo.');
+    riegoTexto('ultima-config', 'Sin consultar');
+    riegoTexto('ultima-config-fecha', 'Una configuración guardada o preparada no confirma su ejecución.');
+    for (const tipo of ['eventos', 'config']) {
+        riegoNodo(tipo + '-filas').replaceChildren();
+        riegoNodo(tipo + '-wrap').hidden = true;
+        riegoNodo(tipo + '-paginacion').hidden = true;
+        riegoNodo(tipo + '-estado').hidden = false;
+        riegoNodo(tipo + '-estado').className = 'riego-vacio';
+        riegoTexto(tipo + '-estado', 'Consulta el historial del dispositivo seleccionado.');
+        riegoTexto(tipo + '-conteo', '—');
+    }
+}
+
+async function riegoPedirHistorial(url, signal) {
+    const respuesta = await fetch(url, {credentials: 'same-origin', cache: 'no-store', signal});
+    if (respuesta.redirected || respuesta.status === 401) throw new Error('Vuelve a iniciar sesión para consultar el historial.');
+    if (respuesta.status === 404) throw new Error('Esta consulta requiere el app.py actualizado con el historial de riego.');
+    let datos;
+    try { datos = await respuesta.json(); }
+    catch (_) { throw new Error('El servidor no devolvió un historial válido.'); }
+    if (!respuesta.ok || datos?.error) throw new Error((datos?.error || 'No se pudo consultar el historial.') +
+        (respuesta.status === 422 ? ' Prueba un intervalo más corto.' : ''));
+    return datos;
+}
+
+function riegoPrepararFilas(datos, tipo, dispositivo) {
+    if (Number(datos?.device_id) !== dispositivo || !Array.isArray(datos.eventos) || datos.eventos.length > 5000) {
+        throw new Error('La respuesta no corresponde al dispositivo o al formato esperado.');
+    }
+    let filas = datos.eventos.map(f => ({...f, referencia_previa: false}));
+    if (tipo === 'config' && datos.configuracion_previa) filas.push({...datos.configuracion_previa, referencia_previa: true});
+    const fecha = tipo === 'eventos' ? 'fecha_recepcion' : 'fecha_hora';
+    const clave = tipo === 'eventos' ? 'idEvento' : 'idControl_riego';
+    for (const fila of filas) {
+        if (Number(fila.idDispositivo) !== dispositivo || typeof fila[fecha] !== 'string' ||
+            !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{3})?$/.test(fila[fecha]) ||
+            !/^\d+$/.test(String(fila[clave]))) throw new Error('El historial contiene un registro incompleto.');
+    }
+    return filas.sort((a, b) => b[fecha].localeCompare(a[fecha]) ||
+        (BigInt(a[clave]) < BigInt(b[clave]) ? 1 : BigInt(a[clave]) > BigInt(b[clave]) ? -1 : 0));
+}
+
+function riegoCelda(fila, texto, clase = '') {
+    const celda = document.createElement('td');
+    celda.textContent = String(texto ?? '—');
+    if (clase) celda.className = clase;
+    fila.appendChild(celda);
+    return celda;
+}
+
+function riegoDetalle(fila, registro, tipo) {
+    const celda = riegoCelda(fila, '');
+    const detalle = document.createElement('details');
+    const titulo = document.createElement('summary');
+    titulo.textContent = 'Ver detalle';
+    detalle.appendChild(titulo);
+    const lineas = tipo === 'eventos' ? [
+        `ON / OFF aceptados: ${registro.modo === 'espera' ? 'Sin configuración' : registro.tiempo_on + ' s / ' + registro.tiempo_off + ' s'}`,
+        `Duración del estado anterior: ${riegoDuracion(registro.duracion_anterior_ms)}`,
+        `Orden manual: ${registro.modo === 'manual' ? riegoSalida(registro.estado_manual) : 'No corresponde'}`,
+        `Arranque: ${registro.arranque_id || 'Sin dato'} · secuencia: ${registro.secuencia ?? 'Sin dato'}`,
+        `Tiempo relativo del Mega: ${registro.uptime_ms ?? 'Sin dato'} ms`,
+        `Avisos descartados desde ese arranque: ${registro.perdidos_total ?? 'Sin dato'}`
+    ] : [
+        `Orden manual: ${registro.modo === 'manual' ? riegoSalida(registro.estado_manual) : 'No corresponde'}`,
+        registro.referencia_previa ? 'Referencia anterior al intervalo consultado.' : 'Registro dentro del intervalo.'
+    ];
+    lineas.push('Versión de configuración: ' + (registro.config_version || 'No disponible'));
+    for (const linea of lineas) {
+        const parrafo = document.createElement('p');
+        parrafo.textContent = linea;
+        detalle.appendChild(parrafo);
+    }
+    celda.appendChild(detalle);
+}
+
+function riegoPintarTabla(tipo) {
+    const fuente = riegoHistorial.fuentes[tipo];
+    const filas = fuente?.filas || [];
+    const paginas = Math.max(1, Math.ceil(filas.length / RIEGO_FILAS_PAGINA));
+    const pagina = Math.min(riegoHistorial.paginas[tipo], paginas - 1);
+    riegoHistorial.paginas[tipo] = pagina;
+    const firma = JSON.stringify([fuente, pagina]);
+    if (riegoHistorial.renderizados[tipo] === firma) return;
+    riegoHistorial.renderizados[tipo] = firma;
+    const estado = riegoNodo(tipo + '-estado');
+    estado.hidden = filas.length > 0;
+    estado.className = fuente?.error ? 'riego-vacio riego-error' : 'riego-vacio';
+    estado.textContent = fuente?.error || (tipo === 'eventos'
+        ? 'No hay avisos recibidos en este intervalo. Ajusta las fechas o espera un reporte del Mega actualizado.'
+        : 'No hay configuraciones en este intervalo ni una referencia anterior disponible.');
+    riegoTexto(tipo + '-conteo', fuente?.error ? 'No disponible' : filas.length + ' registros');
+    riegoNodo(tipo + '-wrap').hidden = !filas.length;
+    riegoNodo(tipo + '-paginacion').hidden = filas.length <= RIEGO_FILAS_PAGINA;
+    const cuerpo = riegoNodo(tipo + '-filas');
+    cuerpo.replaceChildren();
+    for (const registro of filas.slice(pagina * RIEGO_FILAS_PAGINA, (pagina + 1) * RIEGO_FILAS_PAGINA)) {
+        const fila = document.createElement('tr');
+        if (tipo === 'eventos') {
+            riegoCelda(fila, registro.fecha_recepcion);
+            riegoCelda(fila, riegoEtiqueta(registro.tipo_evento), 'riego-tipo');
+            riegoCelda(fila, riegoSalida(registro.estado_relevador));
+            riegoCelda(fila, riegoEtiqueta(registro.modo));
+            riegoCelda(fila, riegoEtiqueta(registro.motivo));
+        } else {
+            riegoCelda(fila, registro.fecha_hora);
+            riegoCelda(fila, riegoEtiqueta(registro.tipo_evento) + (registro.referencia_previa ? ' · referencia anterior' : ''), 'riego-tipo');
+            riegoCelda(fila, riegoEtiqueta(registro.modo));
+            riegoCelda(fila, `${registro.tiempo_on} s / ${registro.tiempo_off} s`);
+            riegoCelda(fila, `${registro.origen || 'Sin origen'} · ${registro.motivo || 'Sin motivo'}`);
+        }
+        riegoDetalle(fila, registro, tipo);
+        cuerpo.appendChild(fila);
+    }
+    riegoTexto(tipo + '-pagina', `Página ${pagina + 1} de ${paginas}`);
+    riegoNodo(tipo + '-anterior').disabled = pagina === 0;
+    riegoNodo(tipo + '-siguiente').disabled = pagina >= paginas - 1;
+}
+
+function riegoPintarResumen() {
+    const avisos = riegoHistorial.fuentes.eventos;
+    const ultimo = avisos?.filas?.[0];
+    riegoTexto('ultima-salida', avisos?.error ? 'Consulta no disponible' : ultimo ? riegoSalida(ultimo.estado_relevador) : 'Sin avisos en el intervalo');
+    riegoTexto('ultimo-aviso', avisos?.error || (ultimo
+        ? `Recepción: ${ultimo.fecha_recepcion}. ${riegoEtiqueta(ultimo.tipo_evento)} · ${riegoEtiqueta(ultimo.modo)}.`
+        : 'Todavía no hay un aviso del Mega que mostrar para estas fechas.'));
+    const configuraciones = riegoHistorial.fuentes.config;
+    const config = configuraciones?.filas?.[0];
+    riegoTexto('ultima-config', configuraciones?.error ? 'Consulta no disponible' : config
+        ? `${riegoEtiqueta(config.modo)} · ON ${config.tiempo_on} s / OFF ${config.tiempo_off} s` : 'Sin configuraciones');
+    riegoTexto('ultima-config-fecha', configuraciones?.error || (config
+        ? `${config.fecha_hora}. ${riegoEtiqueta(config.tipo_evento)}${config.referencia_previa ? ' · referencia anterior al intervalo' : ''}.`
+        : 'No hay una configuración registrada que mostrar.'));
+    riegoNodo('perdidas').hidden = !avisos?.filas?.some(f => Number.isInteger(f.perdidos_total) && f.perdidos_total > 0);
+}
+
+async function cargarHistorialRiego(automatico = false) {
+    const dispositivo = riegoDispositivo();
+    if (dispositivo !== riegoHistorial.dispositivo) riegoInvalidarHistorial();
+    if (!dispositivo) { riegoTexto('consulta-status', 'Selecciona un dispositivo primero.'); return false; }
+    if (automatico && (riegoHistorial.controlador || bombaSolicitudActiva)) return false;
+    let filtros;
+    try {
+        filtros = automatico && riegoHistorial.filtros ? riegoHistorial.filtros :
+            riegoValidarFechas(riegoNodo('desde').value, riegoNodo('hasta').value);
+    } catch (error) {
+        riegoTexto('consulta-status', error.message);
+        riegoNodo('consulta-status').className = 'riego-error';
+        return false;
+    }
+    // Al aplicar otras fechas se retiran los datos de la consulta anterior.
+    if (riegoHistorial.filtros && JSON.stringify(filtros) !== JSON.stringify(riegoHistorial.filtros)) {
+        riegoInvalidarHistorial();
+    }
+    const revision = ++riegoHistorial.revision;
+    if (riegoHistorial.controlador) riegoHistorial.controlador.abort();
+    const controlador = new AbortController();
+    riegoHistorial.controlador = controlador;
+    if (JSON.stringify(filtros) !== JSON.stringify(riegoHistorial.filtros)) riegoHistorial.paginas = {eventos: 0, config: 0};
+    riegoHistorial.filtros = {...filtros};
+    riegoNodo('consultar').disabled = true;
+    riegoNodo('consulta-status').className = '';
+    riegoTexto('consulta-status', 'Consultando los registros…');
+    riegoTexto('rango', `Dispositivo ${dispositivo} · ${filtros.desde.replace('T', ' ')} → ${filtros.hasta.replace('T', ' ')}.`);
+    const parametros = new URLSearchParams({device_id: dispositivo, ...filtros});
+    const espera = setTimeout(() => controlador.abort(), 15000);
+    try {
+        const resultados = await Promise.allSettled([
+            riegoPedirHistorial('/api/riego/eventos?' + parametros, controlador.signal),
+            riegoPedirHistorial('/api/riego/historial?' + parametros, controlador.signal)
+        ]);
+        if (revision !== riegoHistorial.revision || dispositivo !== riegoDispositivo()) return false;
+        for (const [indice, tipo] of ['eventos', 'config'].entries()) {
+            try {
+                const resultado = resultados[indice];
+                if (resultado.status === 'rejected') throw resultado.reason;
+                riegoHistorial.fuentes[tipo] = {filas: riegoPrepararFilas(resultado.value, tipo, dispositivo)};
+            } catch (error) {
+                riegoHistorial.fuentes[tipo] = {error: error.name === 'AbortError'
+                    ? 'El servidor tardó demasiado en responder. Vuelve a consultar.'
+                    : error instanceof TypeError ? 'No se pudo conectar con el servidor.' : error.message};
+            }
+            riegoPintarTabla(tipo);
+        }
+        riegoPintarResumen();
+        const errores = Object.values(riegoHistorial.fuentes).some(f => f?.error);
+        riegoNodo('consulta-status').className = errores ? 'riego-error' : '';
+        riegoTexto('consulta-status', (errores ? 'Consulta incompleta. Revisa los mensajes de cada historial.' :
+            'Consulta realizada a las ' + new Date().toLocaleTimeString('es-MX') + ' (hora de este navegador).'));
+        return !errores;
+    } finally {
+        clearTimeout(espera);
+        if (revision === riegoHistorial.revision) {
+            riegoHistorial.controlador = null;
+            riegoNodo('consultar').disabled = false;
+        }
+    }
+}
+
+// El cambio de dispositivo elimina inmediatamente los registros anteriores y
+// descarta respuestas atrasadas, conservando la funcion original de dashboard.js.
+if (typeof window.invalidarBombaAlCambiarDispositivo === 'function') {
+    const invalidarAnterior = window.invalidarBombaAlCambiarDispositivo;
+    window.invalidarBombaAlCambiarDispositivo = function(...argumentos) {
+        const resultado = invalidarAnterior.apply(this, argumentos);
+        riegoInvalidarHistorial();
+        return resultado;
+    };
+}
+const riegoHoy = new Date();
+riegoHoy.setHours(0, 0, 0, 0);
+const riegoManana = new Date(riegoHoy);
+riegoManana.setDate(riegoManana.getDate() + 1);
+riegoNodo('desde').value = riegoFechaLocal(riegoHoy);
+riegoNodo('hasta').value = riegoFechaLocal(riegoManana);
+riegoNodo('filtros').addEventListener('submit', evento => {
+    evento.preventDefault();
+    void cargarHistorialRiego();
+});
+for (const tipo of ['eventos', 'config']) {
+    for (const [accion, cambio] of [['anterior', -1], ['siguiente', 1]]) {
+        riegoNodo(tipo + '-' + accion).addEventListener('click', () => {
+            const maximo = Math.max(0, Math.ceil((riegoHistorial.fuentes[tipo]?.filas?.length || 0) / RIEGO_FILAS_PAGINA) - 1);
+            riegoHistorial.paginas[tipo] = Math.max(0, Math.min(maximo, riegoHistorial.paginas[tipo] + cambio));
+            riegoPintarTabla(tipo);
+        });
+    }
+}
+setInterval(() => {
+    const seccion = document.getElementById('seccion-relevador');
+    if (!document.hidden && riegoNodo('auto').checked && seccion && getComputedStyle(seccion).display !== 'none') {
+        void cargarHistorialRiego(true);
+    }
+}, 10000);
 </script>
 </body>
 </html>

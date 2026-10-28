@@ -1,4 +1,12 @@
 // AEROGARDEN: paso 1, DS18B20 y TDS dentro de este mismo archivo.
+// ACTIVIDAD 2 - 26/10/2026: integra registro_riego.h y prepara el envio
+// de avisos confirmados. Requiere ese .h junto a este .ino.
+// El envio se activa SOLO si app.py anuncia el protocolo riego_eventos=1.
+// Hasta actualizar el receptor, solo se conservan hasta 8 avisos en RAM.
+// La proteccion de nivel se prepara en config.h y permanece desactivada
+// hasta medir el deposito. Requiere registro_riego.h y app.py con avisos de nivel.
+// Con proteccion activa, el nivel puede bloquear la bomba en cualquier modo.
+// La calibracion y el procesamiento de pH, CE y temperatura se conservan.
 // ============================================================
 // AJUSTE BOMBA 16/10/2026: consulta de configuración al arrancar y
 // diagnóstico de órdenes rechazadas. Se conserva la lógica de riego.
@@ -31,9 +39,10 @@
 #include <DHT.h>
 #include <EEPROM.h>
 #include "config.h"
+#include "registro_riego.h"
 #include "secrets.h"
 // PASO 1 — integración en un único .ino (06/10/2026).
-// Mantener config.h y secrets.h actuales junto a este archivo.
+// Usar config.h con parametros de nivel, registro_riego.h actualizado y secrets.h.
 // Bibliotecas: DHT, OneWire, DallasTemperature y ArduinoJson (6.21.5 o 7.x).
 // Monitor serie: BAUD_DEBUG de config.h (antes: 9600), Nueva línea.
 // Los datos de agua se prueban localmente hasta revisar servidor/unidades.
@@ -244,6 +253,170 @@ unsigned long tCambioRelay = 0;
 
 unsigned long ultimoCiclo = 0;
 
+// La cola guarda avisos; controlarRelay() nunca hace peticiones de red.
+RegistroRiego registroRiego;
+char arranqueRiego[33] = ""; // Sesion de 32 caracteres asignada por app.py.
+bool eventosRiegoHabilitados = false;
+uint32_t ultimoIntentoRiego = 0;
+uint32_t esperaIntentoRiego = 1000UL;
+bool errorEventoRiegoAvisado = false;
+
+// ================================================================
+// NIVEL DE AGUA: decision local y captura del eco sin pulseIn().
+// Solo se compila al habilitar PROTECCION_NIVEL_ACTIVA en config.h.
+// ECHO 51 = PB2/PCINT2 en Mega 2560; no se mueve ningun cable.
+// Mapa: github.com/arduino/ArduinoCore-avr/blob/master/variants/mega/pins_arduino.h
+// HC-SR04: cdn.sparkfun.com/datasheets/Sensors/Proximity/HCSR04.pdf
+// ================================================================
+#ifndef PROTECCION_NIVEL_ACTIVA
+#error "Instala el config.h que incluye los parametros de nivel."
+#endif
+
+#if PROTECCION_NIVEL_ACTIVA
+#if !defined(__AVR_ATmega2560__) || ECHO_PIN != 51
+#error "La captura de nivel requiere Mega 2560 con ECHO_PIN 51."
+#endif
+#include <avr/interrupt.h>
+#include <util/atomic.h>
+static_assert(NIVEL_DIST_RECUPERACION_CM >= 2.0f &&
+              NIVEL_DIST_CORTE_CM <= 400.0f,
+              "Los limites deben estar dentro de 2 a 400 cm del HC-SR04.");
+static_assert(NIVEL_MUESTREO_MS > 60UL && NIVEL_LECTURAS_RECUPERACION <= 255,
+              "Revisa el intervalo de nivel y las lecturas de recuperacion.");
+
+// No depende de pines, red ni EEPROM. Una muestra mala corta de inmediato;
+// para recuperar se exigen N muestras buenas consecutivas <= recuperacion.
+class ProteccionNivel {
+public:
+    enum Estado : uint8_t { SIN_LECTURA, BAJO, INVALIDO, VENCIDO, LISTO };
+    void evaluar(uint32_t ahora) {
+        if (tieneMuestra_ &&
+            (uint32_t)(ahora - ultimaMuestra_) >= NIVEL_MAX_ANTIGUEDAD_MS) {
+            estado_ = VENCIDO;
+            consecutivas_ = 0;
+        }
+    }
+    void muestra(float cm, uint32_t ahora) {
+        evaluar(ahora); // Una pausa larga rompe una recuperacion incompleta.
+        ultimaMuestra_ = ahora;
+        tieneMuestra_ = true;
+        distancia_ = cm;
+        valida_ = isfinite(cm) && cm >= 2.0f && cm <= 400.0f;
+        if (!valida_) {
+            estado_ = INVALIDO;
+            consecutivas_ = 0;
+        } else if (cm >= NIVEL_DIST_CORTE_CM) {
+            estado_ = BAJO;
+            consecutivas_ = 0;
+        } else if (estado_ == LISTO) {
+            consecutivas_ = 0; // En la banda intermedia conserva el permiso.
+        } else if (cm <= NIVEL_DIST_RECUPERACION_CM) {
+            if (consecutivas_ < NIVEL_LECTURAS_RECUPERACION) ++consecutivas_;
+            if (consecutivas_ >= NIVEL_LECTURAS_RECUPERACION) estado_ = LISTO;
+        } else {
+            consecutivas_ = 0; // En la banda intermedia conserva el bloqueo.
+        }
+    }
+    bool bloqueado() const { return estado_ != LISTO; }
+    Estado estado() const { return estado_; }
+    float distancia(uint32_t ahora) const {
+        return tieneMuestra_ && valida_ &&
+               (uint32_t)(ahora - ultimaMuestra_) < NIVEL_MAX_ANTIGUEDAD_MS
+               ? distancia_ : NAN;
+    }
+private:
+    Estado estado_ = SIN_LECTURA;
+    uint8_t consecutivas_ = 0;
+    uint32_t ultimaMuestra_ = 0;
+    float distancia_ = NAN;
+    bool tieneMuestra_ = false, valida_ = false;
+};
+
+ProteccionNivel nivelAgua;
+bool nivelIniciado = false, nivelTareaLenta = false;
+bool nivelMidiendo = false, nivelBloqueoAnterior = true;
+uint32_t nivelUltimoDisparoMs = 0, nivelInicioUs = 0;
+enum : uint8_t { ECO_INACTIVO, ECO_SUBIDA, ECO_BAJADA, ECO_COMPLETO };
+volatile uint8_t nivelEstadoEco = ECO_INACTIVO;
+volatile uint32_t nivelSubidaUs = 0, nivelAnchoUs = 0;
+volatile uint32_t nivelFinUs = 0, nivelFinMs = 0;
+static const uint32_t NIVEL_TIMEOUT_ECO_US = 30000UL;
+
+// Se reserva PCINT0_vect para este eco. La ISR solo captura tiempos;
+// no imprime, no lee otros sensores y no usa JSON ni la red.
+ISR(PCINT0_vect) {
+    bool alto = (PINB & _BV(PB2)) != 0;
+    if (nivelEstadoEco == ECO_SUBIDA && alto) {
+        nivelSubidaUs = (uint32_t)micros();
+        nivelEstadoEco = ECO_BAJADA;
+    } else if (nivelEstadoEco == ECO_BAJADA && !alto) {
+        nivelFinUs = (uint32_t)micros();
+        nivelAnchoUs = nivelFinUs - nivelSubidaUs;
+        nivelFinMs = (uint32_t)millis();
+        nivelEstadoEco = ECO_COMPLETO;
+    }
+}
+
+// Se atiende tambien mientras se espera la respuesta del ESP8266.
+// Solo el pulso TRIG ocupa 12 us; no se espera al eco.
+void actualizarNivel() {
+    if (!nivelIniciado) return;
+    uint32_t ahora = (uint32_t)millis();
+    bool lista = false, vencida = false;
+    uint32_t ancho = 0, finUs = 0, finMs = 0;
+    if (nivelMidiendo) {
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+            lista = nivelEstadoEco == ECO_COMPLETO;
+            vencida = (uint32_t)((uint32_t)micros() - nivelInicioUs) >= NIVEL_TIMEOUT_ECO_US;
+            if (lista || vencida) {
+                ancho = nivelAnchoUs; finUs = nivelFinUs; finMs = nivelFinMs;
+                nivelEstadoEco = ECO_INACTIVO;
+                PCMSK0 &= (uint8_t)~_BV(PCINT2);
+            }
+        }
+        if (lista || vencida) {
+            nivelMidiendo = false;
+            float cm = lista &&
+                       (uint32_t)(finUs - nivelInicioUs) < NIVEL_TIMEOUT_ECO_US
+                       ? ancho * 0.034f / 2.0f : NAN;
+            nivelAgua.muestra(cm, lista ? finMs : ahora);
+        }
+    }
+    ahora = (uint32_t)millis(); // La ISR pudo terminar en el siguiente tick.
+    nivelAgua.evaluar(ahora);
+    if (nivelMidiendo || nivelTareaLenta ||
+        (uint32_t)(ahora - nivelUltimoDisparoMs) < NIVEL_MUESTREO_MS) return;
+    nivelUltimoDisparoMs = ahora;
+    // Un eco ya alto antes de disparar no se interpreta como agua suficiente.
+    if (digitalRead(ECHO_PIN) != LOW) {
+        nivelAgua.muestra(NAN, ahora);
+        return;
+    }
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        nivelEstadoEco = ECO_SUBIDA;
+        nivelInicioUs = (uint32_t)micros();
+        PCIFR = _BV(PCIF0);
+        PCMSK0 |= _BV(PCINT2);
+        PCICR |= _BV(PCIE0);
+    }
+    nivelMidiendo = true;
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+}
+
+RegistroRiego::Motivo motivoNivel() {
+    switch (nivelAgua.estado()) {
+        case ProteccionNivel::BAJO: return RegistroRiego::NIVEL_BAJO;
+        case ProteccionNivel::INVALIDO: return RegistroRiego::NIVEL_INVALIDO;
+        case ProteccionNivel::VENCIDO: return RegistroRiego::NIVEL_VENCIDO;
+        default: return RegistroRiego::NIVEL_SIN_LECTURA;
+    }
+}
+#endif
+
 // ================================================================
 // EEPROM
 // ================================================================
@@ -416,10 +589,114 @@ void enviarDatos(float temp, float humedad, float dist) {
 }
 
 // ================================================================
+// REGISTRO DE RIEGO - TRANSPORTE AL SERVIDOR
+// Protocolo previsto para la siguiente actualizacion de app.py:
+// GET config?registro_riego=1[&arranque_id=<sesion>]
+//   -> {"relay":{...},"riego_eventos":{"protocolo":1,"arranque_id":"<32 hex>"}}
+// POST /api/arduino/riego/evento con token, device_id, arranque_id y evento.
+//   -> {"status":"ok","arranque_id":"<misma sesion>","secuencia":<mismo aviso>}
+// Un servidor anterior puede seguir enviando la configuracion normal: no se
+// intentan POST de eventos si no anuncia este protocolo. La cola es finita.
+// ================================================================
+bool identificadorRiegoValido(const char *identificador) {
+    if (!identificador || strlen(identificador) != 32) return false;
+    for (uint8_t i = 0; i < 32; ++i) {
+        char c = identificador[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
+bool configurarTransporteRiego(const char *identificador, int protocolo) {
+    eventosRiegoHabilitados = false;
+    if (protocolo != 1 || !identificadorRiegoValido(identificador)) return false;
+    if (arranqueRiego[0] == '\0') {
+        memcpy(arranqueRiego, identificador, sizeof(arranqueRiego));
+    } else if (strcmp(arranqueRiego, identificador) != 0) {
+        // Una sesion distinta no puede confirmar los avisos de este arranque.
+        return false;
+    }
+    eventosRiegoHabilitados = true;
+    return true;
+}
+
+bool confirmarEventoRiego(const char *identificador, uint32_t secuencia) {
+    return eventosRiegoHabilitados && identificadorRiegoValido(identificador) &&
+           strcmp(arranqueRiego, identificador) == 0 && registroRiego.confirmar(secuencia);
+}
+
+void enviarEventoRiego() {
+    const RegistroRiego::Evento *e = registroRiego.pendiente();
+    if (deviceId <= 0 || !eventosRiegoHabilitados || !e) return;
+    uint32_t ahora = (uint32_t)millis();
+    if ((uint32_t)(ahora - ultimoIntentoRiego) < esperaIntentoRiego) return;
+    ultimoIntentoRiego = ahora;
+    esperaIntentoRiego = 10000UL; // Fallo o ACK perdido: reintentar sin retirar el aviso.
+
+    // Solo un aviso por peticion. No agranda el paquete de sensores.
+    StaticJsonDocument<768> doc;
+    doc["token"] = ARDUINO_TOKEN;
+    doc["device_id"] = deviceId;
+    doc["arranque_id"] = arranqueRiego;
+    JsonObject evento = doc.createNestedObject("evento");
+    evento["secuencia"] = e->secuencia;
+    evento["tipo_evento"] = RegistroRiego::tipoTexto(e->tipo);
+    evento["estado_relevador"] = e->encendido ? "encendido" : "apagado";
+    evento["modo"] = e->tiene_config ? (e->manual ? "manual" : "automatico") : "espera";
+    evento["estado_manual"] = e->orden_manual ? "encendido" : "apagado";
+    evento["tiempo_on"] = e->tiempo_on;
+    evento["tiempo_off"] = e->tiempo_off;
+    char version[65];
+    if (e->tiene_version) {
+        RegistroRiego::versionTexto(*e, version);
+        evento["config_version"] = version;
+    } else evento["config_version"] = nullptr;
+    evento["motivo"] = RegistroRiego::motivoTexto(e->motivo);
+    evento["uptime_ms"] = e->uptime_ms;
+    if (RegistroRiego::tieneDuracion(*e)) evento["duracion_anterior_ms"] = e->duracion_anterior_ms;
+    else evento["duracion_anterior_ms"] = nullptr;
+    evento["perdidos_total"] = e->perdidos_total;
+    if (doc.overflowed()) {
+        if (!errorEventoRiegoAvisado) imprimirSeguro(F("Riego: aviso demasiado grande; sigue pendiente."));
+        errorEventoRiegoAvisado = true;
+        return;
+    }
+
+    uint32_t secuencia = e->secuencia;
+    String respuesta;
+    {
+        String json;
+        serializeJson(doc, json);
+        respuesta = enviarAlESP32("POST:/api/arduino/riego/evento:" + json, 10000);
+    }
+    doc.clear();
+    bool confirmado = false;
+    if (!deserializeJson(doc, respuesta) &&
+        strcmp(doc["status"] | "", "ok") == 0 &&
+        doc["arranque_id"].is<const char*>() && doc["secuencia"].is<uint32_t>() &&
+        doc["secuencia"].as<uint32_t>() == secuencia) {
+        confirmado = confirmarEventoRiego(doc["arranque_id"].as<const char*>(), secuencia);
+    }
+    if (confirmado) {
+        // El siguiente aviso podra enviarse en un segundo.
+        ultimoIntentoRiego = (uint32_t)millis();
+        esperaIntentoRiego = 1000UL;
+        if (errorEventoRiegoAvisado) imprimirSeguro(F("Riego: recepcion de avisos reanudada."));
+        errorEventoRiegoAvisado = false;
+    } else {
+        // Ningun error de red cambia la orden de la bomba ni retira avisos.
+        if (!errorEventoRiegoAvisado) imprimirSeguro(F("Riego: sin confirmacion; aviso conservado para reintento."));
+        errorEventoRiegoAvisado = true;
+    }
+}
+
+// ================================================================
 // PEDIR CONFIG DEL RELAY
 // ================================================================
 void pedirConfig() {
     String cmd="GET:/api/arduino/config?token="+String(ARDUINO_TOKEN)+"&device_id="+String(deviceId);
+    cmd += "&registro_riego=1";
+    if (arranqueRiego[0] != '\0') cmd += "&arranque_id=" + String(arranqueRiego);
     String respuesta=enviarAlESP32(cmd,TIMEOUT_ESP);
     if (DEBUG_SERIAL_ANTERIOR) {
         Serial.print(F("Config: "));
@@ -465,9 +742,18 @@ void pedirConfig() {
         (strcmp(estado,"encendido")==0)!=estadoManual || on!=tiempoOn || off!=tiempoOff;
     if(!configRecibida || nuevoManual!=modoManual){
         tCambioRelay=millis();bombaEncendida=false;digitalWrite(RELAY_PIN,RELAY_OFF);
+        registroRiego.salida(false, RegistroRiego::CONFIGURACION, (uint32_t)tCambioRelay);
     }
     tiempoOn=on;tiempoOff=off;modoManual=nuevoManual;estadoManual=strcmp(estado,"encendido")==0;
-    configRecibida=true;controlarRelay();
+    configRecibida=true;
+    const char *version = r["config_version"].is<const char*>()
+                          ? r["config_version"].as<const char*>() : nullptr;
+    registroRiego.configurar((uint16_t)tiempoOn, (uint16_t)tiempoOff,
+                            modoManual, estadoManual, version, (uint32_t)millis());
+    JsonObject transporte = doc["riego_eventos"];
+    configurarTransporteRiego(transporte["arranque_id"].as<const char*>(),
+                             transporte["protocolo"].is<int>() ? transporte["protocolo"].as<int>() : 0);
+    controlarRelay();
     if(cambioConfig){
         imprimirSeguro(String(F("Bomba: config aceptada, modo="))+modo+
             F(", estado_manual=")+estado+F(", ON=")+String(tiempoOn)+
@@ -477,7 +763,10 @@ void pedirConfig() {
 
 // ================================================================
 // CONTROL RELAY
-// VERSIÓN 16/10/2026 — app.py decide, el Mega ejecuta
+// app.py configura tiempos y modo; el Mega ejecuta y aplica los bloqueos.
+// Con proteccion activa, nivel bajo/invalido/vencido impide cualquier ON.
+// Al recuperar, manual sigue la orden vigente; automatico espera su fase OFF.
+// VERSIÓN 16/10/2026 — control base conservado cuando nivel esta desactivado
 //  - Sin decisión de app.py (aún no llega una config válida o no hay
 //    device_id) la bomba queda en OFF: el Mega no decide por su cuenta.
 //  - Al llegar la decisión de app.py en automático (primera config o
@@ -492,7 +781,10 @@ void pedirConfig() {
 //    vacío, para no bloquear la lectura de la respuesta del ESP8266.
 // ================================================================
 void controlarRelay() {
-    // modo: 0 calibración, 1 esperando a app.py, 2 manual, 3 automático
+#if PROTECCION_NIVEL_ACTIVA
+    actualizarNivel(); // Sin esperas de eco; tambien durante las respuestas del ESP.
+#endif
+    // modo: 0 calibracion, 1 esperando app.py, 2 manual, 3 auto, 4 bloqueo por nivel
     static uint8_t modoPrevio = 1;
     static uint8_t avisado = 0xFF;              // último estado impreso
     static int onAvisado = -1, offAvisado = -1;
@@ -510,7 +802,23 @@ void controlarRelay() {
     else if (modoManual)                        modo = 2;
     else                                        modo = 3;
 
-    if (modo <= 1) {
+#if PROTECCION_NIVEL_ACTIVA
+    bool bloqueadoNivel = nivelAgua.bloqueado();
+    if (nivelBloqueoAnterior && !bloqueadoNivel) {
+        // Se registra OFF antes de que una orden manual pueda volver a encender.
+        registroRiego.proteccionNivel(false, RegistroRiego::NIVEL_RECUPERADO,
+                                     (uint32_t)ahora);
+        bombaEncendida = false;
+        tCambioRelay = ahora; // Automatico retoma con una fase OFF completa.
+    }
+    nivelBloqueoAnterior = bloqueadoNivel;
+    if (bloqueadoNivel) modo = 4;
+#endif
+
+    if (modo == 4) {
+        bombaEncendida = false;
+        tCambioRelay = ahora; // No acumular tiempo de una fase mientras esta bloqueada.
+    } else if (modo <= 1) {
         bombaEncendida = false;                 // calibrando o sin decisión de app.py
     } else if (modo == 2) {
         bombaEncendida = estadoManual;          // lo que ordena app.py
@@ -526,16 +834,40 @@ void controlarRelay() {
     }
     modoPrevio = modo;
     digitalWrite(RELAY_PIN, bombaEncendida ? RELAY_ON : RELAY_OFF);
+    RegistroRiego::Motivo motivo = modo == 0 ? RegistroRiego::CALIBRACION :
+                                  modo == 1 ? RegistroRiego::ESPERA :
+                                  modo == 2 ? RegistroRiego::MANUAL : RegistroRiego::CICLO;
+#if PROTECCION_NIVEL_ACTIVA
+    if (modo == 4) motivo = motivoNivel();
+#endif
+    registroRiego.salida(bombaEncendida, motivo, (uint32_t)ahora);
+#if PROTECCION_NIVEL_ACTIVA
+    if (modo == 4) registroRiego.proteccionNivel(true, motivo, (uint32_t)ahora);
+#endif
 
     // Aviso por monitor serie: solo si algo cambió y el buffer USB está
     // vacío; si no, se reintenta en la siguiente llamada.
     uint8_t estado = modo * 2 + (bombaEncendida ? 1 : 0);
+#if PROTECCION_NIVEL_ACTIVA
+    if (modo == 4) estado = 8 + (uint8_t)nivelAgua.estado();
+#endif
     bool cambio = estado != avisado ||
                   (modo == 3 && (tiempoOn != onAvisado || tiempoOff != offAvisado));
     if (!cambio || Serial.availableForWrite() < SERIAL_TX_BUFFER_SIZE - 1) return;
     avisado = estado; onAvisado = tiempoOn; offAvisado = tiempoOff;
 
     Serial.print(bombaEncendida ? F("Bomba ON") : F("Bomba OFF"));
+#if PROTECCION_NIVEL_ACTIVA
+    if (modo == 4) {
+        switch (nivelAgua.estado()) {
+            case ProteccionNivel::BAJO: Serial.println(F(" (bloqueo: nivel bajo)")); break;
+            case ProteccionNivel::INVALIDO: Serial.println(F(" (bloqueo: eco no valido)")); break;
+            case ProteccionNivel::VENCIDO: Serial.println(F(" (bloqueo: nivel vencido)")); break;
+            default: Serial.println(F(" (bloqueo: nivel pendiente de validar)")); break;
+        }
+        return;
+    }
+#endif
     if (modo == 0) { Serial.println(F(" (calibracion EC)")); return; }
     if (modo == 1) {
         Serial.println(deviceId <= 0 ? F(": sin device_id valido")
@@ -555,10 +887,15 @@ void controlarRelay() {
 // SENSOR ULTRASÓNICO
 // ================================================================
 float leerUltrasonico() {
+#if PROTECCION_NIVEL_ACTIVA
+    // Usa la misma medicion que protege la bomba; no dispara un segundo eco.
+    return nivelAgua.distancia((uint32_t)millis());
+#else
     digitalWrite(TRIG_PIN, LOW);  delayMicroseconds(2);
     digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
     digitalWrite(TRIG_PIN, LOW);
     return pulseIn(ECHO_PIN, HIGH, 30000) * 0.034 / 2.0;
+#endif
 }
 
 // ================================================================
@@ -571,6 +908,7 @@ void setup() {
     // de encendido al arrancar (el módulo es activo en bajo).
     digitalWrite(RELAY_PIN, RELAY_OFF);
     pinMode(RELAY_PIN, OUTPUT);
+    registroRiego.iniciar((uint32_t)millis());
 
     Serial.begin(BAUD_DEBUG);
     Serial1.begin(BAUD_ESP);   // comunicación con ESP8266
@@ -579,6 +917,12 @@ void setup() {
     agua.begin();
     pinMode(TRIG_PIN, OUTPUT);
     pinMode(ECHO_PIN, INPUT);
+#if PROTECCION_NIVEL_ACTIVA
+    digitalWrite(TRIG_PIN, LOW);
+    nivelUltimoDisparoMs = (uint32_t)millis() - NIVEL_MUESTREO_MS;
+    nivelIniciado = true;
+    controlarRelay(); // OFF hasta completar las lecturas de recuperacion.
+#endif
 
     Serial.println(F("=== Iniciando sistema ==="));
     Serial.println(F("Esperando que el ESP8266 conecte al WiFi..."));
@@ -635,8 +979,18 @@ void loop() {
     if (ahora - ultimoCiclo >= INTERVALO_DATOS) {
         ultimoCiclo = ahora;
 
+#if PROTECCION_NIVEL_ACTIVA
+        // El DHT deshabilita interrupciones mientras mide. Terminar el eco
+        // pendiente y no disparar otro durante esa lectura evita corromperlo.
+        nivelTareaLenta = true;
+        while (nivelMidiendo) controlarRelay();
+#endif
         float temp    = dht.readTemperature();
         float humedad = dht.readHumidity();
+#if PROTECCION_NIVEL_ACTIVA
+        nivelTareaLenta = false;
+        controlarRelay();
+#endif
         float dist    = leerUltrasonico();
 
         // Una falla del DHT22 no detiene los demás sensores.
@@ -644,10 +998,24 @@ void loop() {
         pedirConfig();
     }
 
+    enviarEventoRiego(); // Red fuera de controlarRelay(); un aviso por iteracion.
     controlarRelay();
 }
 // Las esperas de red y muestreo mantienen el riego y el DS18B20 activos.
-void atenderLocal(){controlarRelay();agua.update();controlarRelay();}
+void atenderLocal(){
+    controlarRelay();
+#if PROTECCION_NIVEL_ACTIVA
+    // OneWire necesita tiempos precisos: no hacerlo coincidir con el eco.
+    if (!nivelMidiendo) {
+        nivelTareaLenta = true;
+        agua.update();
+        nivelTareaLenta = false;
+    }
+#else
+    agua.update();
+#endif
+    controlarRelay();
+}
 void esperarAtendiendo(unsigned long ms){unsigned long t=millis();while(millis()-t<ms)atenderLocal();}
 
 void imprimirSeguro(const String &mensaje){
