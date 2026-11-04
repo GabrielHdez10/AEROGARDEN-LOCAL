@@ -160,6 +160,13 @@
             stroke: #ffffff;
         }
 
+        /* Nutrientes (03/11/2026): con un botón más, en pantallas de menos de
+           1400 px los botones se juntan un poco para que quepa "Cerrar sesión". */
+        @media (max-width: 1399px) {
+            nav { padding: 0 16px; }
+            nav button { padding: 7px 8px; gap: 4px; }
+        }
+
         .nav-logout {
             margin-left: auto;
             display: flex;
@@ -809,7 +816,16 @@
             .riego-filtros input { width: 100%; }
             .riego-paginacion { justify-content: flex-start; }
         }
-</style>
+
+        .aviso-bomba { margin: 0 16px 14px; padding: 12px; border-radius: 10px;
+            border-left: 4px solid #78909c; background: #f2f6f7; color: #334b55;
+            font-size: 13px; line-height: 1.5; }
+        .aviso-bomba strong, .aviso-bomba span { display: block; }
+        .aviso-bomba small { display: block; margin-top: 6px; font-size: 11px; color: #546e7a; }
+        .aviso-bomba[data-tono="alerta"] { border-color: #c0392b; background: #fff0ed; color: #8e2b21; }
+        .aviso-bomba[data-tono="precaucion"] { border-color: #b9770e; background: #fff7e0; color: #77520c; }
+        .aviso-bomba[data-tono="bien"] { border-color: #287454; background: #edf8f1; color: #205d43; }
+    </style>
 </head>
 <body>
 
@@ -843,6 +859,10 @@
     <button onclick="mostrarSeccion('seccion-cultivos')">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22V12m0 0C12 7 7 4 2 4c0 5 3 9 7 10m3-2c0-5 5-8 10-8-1 5-4 8-10 8"/></svg>
         <span data-i18n="nav_cultivos">Cultivos</span>
+    </button>
+    <button onclick="mostrarSeccion('seccion-nutrientes'); abrirNutrientes()">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v7.5L4.7 19.6a1.6 1.6 0 0 0 1.4 2.4h11.8a1.6 1.6 0 0 0 1.4-2.4L14 9.5V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></svg>
+        <span>Nutrientes</span>
     </button>
     <button id="btn-nav-alertas" onclick="mostrarSeccion('seccion-alertas'); cargarAlertasSeccion();">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
@@ -923,6 +943,13 @@
             </div>
             <div class="inicio-panel-body" id="inicio-bomba">
                 <div class="inicio-vacio">Cargando estado...</div>
+            </div>
+            <div id="inicio-aviso-bomba" class="aviso-bomba" data-tono="espera">
+                <div role="status" aria-live="polite" aria-atomic="true">
+                    <strong data-aviso="titulo">Esperando un reporte del controlador…</strong>
+                    <span data-aviso="detalle"></span>
+                </div>
+                <small data-aviso="pie" aria-live="off"></small>
             </div>
             <p id="inicio-msg-bomba" role="status" aria-live="polite" style="font-size:12px; padding:0 16px 14px; display:none;"></p>
         </div>
@@ -1104,6 +1131,23 @@
 </div>
 
 
+<!-- ── NUTRIENTES · Dosificación asistida (Actividad 2) · 03/11/2026 ──
+     Muestra aquí la página /dosificacion (dosificacion.py). Se carga la primera
+     vez que se abre esta sección; antes de eso no consulta al servidor. -->
+<div id="seccion-nutrientes" class="seccion">
+    <iframe id="marco-nutrientes" title="Solución nutritiva"
+            data-src="{{ request.script_root }}/dosificacion"
+            style="display:block; width:100%; height:calc(100vh - 124px); min-height:520px; border:0; border-radius:12px; background:#f3f7f4;"></iframe>
+</div>
+<script>
+    // Carga la página de nutrientes solo la primera vez que se abre la sección.
+    function abrirNutrientes() {
+        const marco = document.getElementById('marco-nutrientes');
+        if (marco && !marco.getAttribute('src')) marco.setAttribute('src', marco.dataset.src);
+    }
+</script>
+
+
 <div id="seccion-alertas" class="seccion">
     <h1 data-i18n="alert_titulo">🔔 Centro de Alertas</h1>
 
@@ -1181,6 +1225,14 @@
             <button class="btn-rojo"  onclick="controlManualBomba('apagado')" data-i18n="bomba_apagar">⏹ Apagar ahora</button>
         </div>
     </div>
+
+    <div id="relevador-aviso-bomba" class="aviso-bomba" data-tono="espera">
+                <div role="status" aria-live="polite" aria-atomic="true">
+                    <strong data-aviso="titulo">Esperando un reporte del controlador…</strong>
+                    <span data-aviso="detalle"></span>
+                </div>
+                <small data-aviso="pie" aria-live="off"></small>
+            </div>
 
     
     <div class="card">
@@ -1846,10 +1898,11 @@
         'seccion-logica': 2,
         'seccion-analitica': 3,
         'seccion-cultivos': 4,
-        'seccion-alertas': 5,
-        'seccion-relevador': 6,
-        'seccion-wifi': 7,
-        'seccion-configuracion': 8,
+        'seccion-nutrientes': 5,
+        'seccion-alertas': 6,
+        'seccion-relevador': 7,
+        'seccion-wifi': 8,
+        'seccion-configuracion': 9,
     };
 
     function marcarNavActivo(seccionId) {
@@ -2547,6 +2600,141 @@ setInterval(() => {
         void cargarHistorialRiego(true);
     }
 }, 10000);
+</script>
+<script id="script-avisos-bomba">
+// El aviso usa una instantanea reciente del Mega, nunca la orden configurada
+// ni el ultimo evento historico. La ausencia de reportes no prueba desconexion.
+const bombaAvisos = { dispositivo: null, revision: 0, controlador: null,
+    respuesta: null, inicio: 0, proxima: 0, estado: 'esperando' };
+
+function bombaAvisoContenido(reporte) {
+    if (!reporte || typeof reporte.encendida !== 'boolean' ||
+        typeof reporte.proteccion_nivel !== 'boolean' ||
+        typeof reporte.config_recibida !== 'boolean' ||
+        typeof reporte.calibrando_ec !== 'boolean' ||
+        !['manual', 'automatico'].includes(reporte.modo)) return null;
+    const r = reporte;
+    if (r.proteccion_nivel) {
+        if (!['sin_lectura', 'bajo', 'invalido', 'vencido', 'listo'].includes(r.nivel_estado) ||
+            !Number.isFinite(r.corte_cm) || !Number.isFinite(r.recuperacion_cm) ||
+            !(2 <= r.recuperacion_cm && r.recuperacion_cm < r.corte_cm && r.corte_cm <= 400)) return null;
+        if (r.nivel_estado !== 'listo') {
+            if (r.encendida) return null;
+            // La histeresis puede mantener el bloqueo aun despues de rellenar.
+            if (Number.isFinite(r.distancia_cm) && r.distancia_cm >= 2 && r.distancia_cm < r.corte_cm) {
+                return r.distancia_cm <= r.recuperacion_cm
+                    ? {tono: 'espera', titulo: 'La bomba espera validar el nivel recuperado.',
+                       detalle: 'El riego se habilita cuando el controlador confirma las lecturas necesarias.'}
+                    : {tono: 'alerta', titulo: 'La bomba sigue bloqueada por el nivel de agua.',
+                       detalle: 'Añade agua manualmente hasta alcanzar el nivel de recuperación.'};
+            }
+            const avisos = {
+                bajo: ['La bomba no puede encenderse por nivel bajo de agua.', 'Revisa el depósito y repón agua manualmente para recuperar el riego.'],
+                invalido: ['No se puede comprobar el nivel de agua.', 'La salida permanece apagada por protección. Revisa el sensor y su montaje.'],
+                vencido: ['La bomba está bloqueada por una lectura de nivel vencida.', 'El controlador necesita una nueva lectura válida para recuperar el riego.'],
+                sin_lectura: ['La bomba espera confirmar el nivel de agua.', 'El controlador mantiene la salida apagada mientras valida el nivel.']
+            };
+            const a = avisos[r.nivel_estado];
+            return {tono: r.nivel_estado === 'sin_lectura' ? 'espera' : 'alerta', titulo: a[0], detalle: a[1]};
+        }
+        if (!Number.isFinite(r.distancia_cm) || r.distancia_cm < 2 || r.distancia_cm >= r.corte_cm) return null;
+    } else if (r.nivel_estado !== 'desactivada') return null;
+    if (r.encendida && (!r.config_recibida || r.calibrando_ec)) return null;
+    if (r.calibrando_ec) return {tono: 'espera', titulo: 'La bomba está pausada durante la calibración.', detalle: 'El controlador mantiene la salida apagada mientras se calibra la conductividad.'};
+    if (!r.config_recibida) return {tono: 'espera', titulo: 'La bomba espera una configuración válida.', detalle: 'El riego comenzará cuando el controlador reciba la configuración del servidor.'};
+    if (!r.proteccion_nivel) return {tono: 'alerta', titulo: 'La protección por nivel está desactivada.', detalle: 'El controlador no bloqueará el riego por nivel bajo con esta configuración.'};
+    if (r.distancia_cm > r.recuperacion_cm) return {tono: 'precaucion', titulo: 'El depósito tiene poca reserva de agua.', detalle: 'El nivel se aproxima al límite de corte configurado. Revisa el depósito y repón agua.'};
+    if (r.encendida) return {tono: 'bien', titulo: 'El controlador reporta la salida de la bomba encendida.', detalle: 'El nivel de agua permite el riego.'};
+    return r.modo === 'manual'
+        ? {tono: 'espera', titulo: 'La bomba está apagada por control manual.', detalle: 'El nivel de agua permite el riego; el controlador reporta la salida apagada.'}
+        : {tono: 'espera', titulo: 'La bomba está en la pausa del ciclo automático.', detalle: 'El nivel de agua permite el riego; el controlador espera la siguiente fase.'};
+}
+
+function bombaAvisosPintar() {
+    const actual = Number(dispositivoActualId);
+    const respuesta = bombaAvisos.respuesta;
+    const edad = respuesta && Number.isFinite(respuesta.edad_ms)
+        ? respuesta.edad_ms + Math.max(0, performance.now() - bombaAvisos.inicio) : null;
+    let contenido = null;
+    let pie = '';
+    if (actual === bombaAvisos.dispositivo && respuesta?.vigente === true &&
+        edad !== null && edad >= 0 && edad < 45000) contenido = bombaAvisoContenido(respuesta.reporte);
+    if (contenido) {
+        pie = 'Salida reportada: ' + (respuesta.reporte.encendida ? 'encendida' : 'apagada') +
+            '. Reporte recibido hace ' + Math.floor(edad / 1000) + ' s.';
+    } else if (!Number.isInteger(actual) || actual < 1) {
+        contenido = {tono: 'espera', titulo: 'Selecciona un dispositivo para consultar la bomba.', detalle: ''};
+    } else if (actual !== bombaAvisos.dispositivo || bombaAvisos.estado === 'consultando') {
+        contenido = {tono: 'espera', titulo: 'Consultando el estado del controlador…', detalle: ''};
+    } else {
+        contenido = {tono: 'espera', titulo: 'No hay un reporte reciente de la bomba.',
+            detalle: 'No se puede confirmar su estado actual. Revisa la comunicación del módulo.'};
+    }
+    for (const id of ['inicio-aviso-bomba', 'relevador-aviso-bomba']) {
+        const nodo = document.getElementById(id);
+        if (!nodo) continue;
+        nodo.dataset.tono = contenido.tono;
+        for (const [campo, texto] of [['titulo', contenido.titulo], ['detalle', contenido.detalle], ['pie', pie]]) {
+            const destino = nodo.querySelector('[data-aviso="' + campo + '"]');
+            if (destino && destino.textContent !== texto) destino.textContent = texto;
+        }
+    }
+}
+
+async function bombaAvisosConsultar(deviceId) {
+    const revision = ++bombaAvisos.revision;
+    const controlador = new AbortController();
+    bombaAvisos.controlador = controlador;
+    bombaAvisos.estado = 'consultando';
+    const inicio = performance.now();
+    const espera = setTimeout(() => controlador.abort(), 7000);
+    try {
+        const r = await fetch('/api/relevador/aviso?device_id=' + deviceId,
+            {credentials: 'same-origin', cache: 'no-store', signal: controlador.signal});
+        if (!r.ok || r.redirected) throw new Error('Consulta no disponible');
+        const data = await r.json();
+        if (data.device_id !== deviceId || typeof data.vigente !== 'boolean' ||
+            (data.vigente && (!Number.isFinite(data.edad_ms) || data.edad_ms < 0 ||
+                !bombaAvisoContenido(data.reporte)))) throw new Error('Reporte no valido');
+        if (revision !== bombaAvisos.revision || deviceId !== Number(dispositivoActualId)) return;
+        bombaAvisos.respuesta = data;
+        bombaAvisos.inicio = inicio;
+        bombaAvisos.estado = 'recibido';
+    } catch (_) {
+        if (revision !== bombaAvisos.revision || deviceId !== Number(dispositivoActualId)) return;
+        bombaAvisos.respuesta = null;
+        bombaAvisos.estado = 'error';
+    } finally {
+        clearTimeout(espera);
+        if (revision === bombaAvisos.revision) {
+            bombaAvisos.controlador = null;
+            bombaAvisos.proxima = performance.now() + 10000;
+            bombaAvisosPintar();
+        }
+    }
+}
+
+function bombaAvisosActualizar() {
+    const actual = Number(dispositivoActualId);
+    if (actual !== bombaAvisos.dispositivo) {
+        ++bombaAvisos.revision;
+        bombaAvisos.controlador?.abort();
+        Object.assign(bombaAvisos, {dispositivo: actual, controlador: null, respuesta: null,
+            proxima: 0, estado: 'esperando'});
+    }
+    bombaAvisosPintar();
+    if (document.hidden || !Number.isInteger(actual) || actual < 1 || bombaAvisos.controlador) return;
+    const visible = ['dashboard-contenido', 'seccion-relevador'].some(id => {
+        const nodo = document.getElementById(id);
+        return nodo && getComputedStyle(nodo).display !== 'none';
+    });
+    if (visible && performance.now() >= bombaAvisos.proxima) void bombaAvisosConsultar(actual);
+}
+setInterval(bombaAvisosActualizar, 1000);
+document.addEventListener('visibilitychange', bombaAvisosActualizar);
+document.addEventListener('change', bombaAvisosActualizar);
+bombaAvisosActualizar();
+
 </script>
 </body>
 </html>

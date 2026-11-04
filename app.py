@@ -2687,6 +2687,97 @@ def _agua_preparar(tipo,valor,meta,origen,destino):
     return round(v*(1000 if _agua_unidad(destino)=='us/cm' else 1),4),d
 
 
+# Avisos de bomba: instantanea reciente, separada de las ordenes y del historial.
+# Para la ejecucion local con python app.py (un proceso). No escribe nuevas tablas.
+BOMBA_REPORTE_MAX_EDAD_MS = 45000
+_bomba_estados = {}
+_bomba_estados_lock = threading.Lock()
+
+
+def _bomba_estado_validar(raw):
+    if not isinstance(raw, dict) or type(raw.get('version')) is not int or raw['version'] != 1:
+        raise ValueError('Formato de estado de bomba no compatible.')
+    nombres = ('encendida', 'config_recibida', 'calibrando_ec', 'proteccion_nivel')
+    if any(type(raw.get(k)) is not bool for k in nombres):
+        raise ValueError('Estado de bomba incompleto.')
+    if raw.get('modo') not in ('manual', 'automatico'):
+        raise ValueError('Modo de bomba no valido.')
+    if type(raw.get('uptime_ms')) is not int or not 0 <= raw['uptime_ms'] <= 4294967295:
+        raise ValueError('Reloj de bomba no valido.')
+    nivel = raw.get('nivel_estado')
+    if nivel not in ('desactivada', 'sin_lectura', 'bajo', 'invalido', 'vencido', 'listo'):
+        raise ValueError('Estado de nivel no valido.')
+    distancia = raw.get('distancia_cm')
+    def numero(v):
+        return type(v) in (int, float) and math.isfinite(v)
+    if distancia is not None and (not numero(distancia) or not 2 <= distancia <= 400):
+        raise ValueError('Distancia de nivel no valida.')
+    if raw['proteccion_nivel']:
+        corte, recuperacion = raw.get('corte_cm'), raw.get('recuperacion_cm')
+        if (nivel == 'desactivada' or not numero(corte) or not numero(recuperacion)
+                or not 2 <= recuperacion < corte <= 400):
+            raise ValueError('Limites de nivel no validos.')
+        if nivel == 'listo' and (distancia is None or distancia >= corte):
+            raise ValueError('Nivel habilitado sin lectura valida.')
+    elif nivel != 'desactivada' or raw.get('corte_cm') is not None or raw.get('recuperacion_cm') is not None:
+        raise ValueError('Proteccion desactivada con estado incompatible.')
+    if raw['encendida'] and (not raw['config_recibida'] or raw['calibrando_ec']
+                            or (raw['proteccion_nivel'] and nivel != 'listo')):
+        raise ValueError('Salida encendida incompatible con un bloqueo.')
+    claves = ('version', 'uptime_ms', 'encendida', 'config_recibida', 'calibrando_ec',
+              'modo', 'proteccion_nivel', 'nivel_estado', 'distancia_cm', 'corte_cm', 'recuperacion_cm')
+    return {k: raw.get(k) for k in claves}
+
+
+def _bomba_estado_guardar(device_id, estado, recibido):
+    with _bomba_estados_lock:
+        _bomba_estados.pop(device_id, None)
+        # Limite fijo de memoria; el aviso es temporal, el historial sigue en MySQL.
+        if len(_bomba_estados) >= 128:
+            _bomba_estados.pop(next(iter(_bomba_estados)))
+        _bomba_estados[device_id] = (dict(estado), recibido)
+
+
+def _bomba_estado_olvidar(device_id):
+    with _bomba_estados_lock:
+        _bomba_estados.pop(device_id, None)
+
+
+def _bomba_estado_leer(device_id):
+    with _bomba_estados_lock:
+        item = _bomba_estados.get(device_id)
+        if item is not None:
+            estado, recibido = item
+            edad = max(0, math.ceil((time.monotonic() - recibido) * 1000))
+            if edad >= BOMBA_REPORTE_MAX_EDAD_MS:
+                _bomba_estados.pop(device_id, None)
+                return dict(vigente=False, reporte=None, edad_ms=edad, motivo='vencido')
+            return dict(vigente=True, reporte=dict(estado), edad_ms=edad, motivo='reporte')
+    return dict(vigente=False, reporte=None, edad_ms=None, motivo='sin_reporte')
+
+
+@app.get('/api/relevador/aviso')
+@login_requerido
+def aviso_relevador():
+    device_id = request.args.get('device_id', type=int)
+    if not device_id or device_id < 1:
+        return jsonify(error='Selecciona un dispositivo valido.'), 400
+    usuario = get_id_usuario()
+    if usuario is None:
+        return jsonify(error='La sesion ya no es valida.'), 401
+    try:
+        with sesion_rangos() as (_, cursor):
+            if not permiso_rangos(cursor, device_id, usuario):
+                return jsonify(error='Dispositivo no encontrado o sin permiso.'), 403
+        respuesta = jsonify(device_id=device_id, max_edad_ms=BOMBA_REPORTE_MAX_EDAD_MS,
+                            **_bomba_estado_leer(device_id))
+        respuesta.headers['Cache-Control'] = 'no-store'
+        return respuesta
+    except Exception:
+        app.logger.exception('No se pudo consultar el aviso de bomba')
+        return jsonify(error='No se pudo consultar el estado del controlador.'), 503
+
+
 def _agua_instalar(n):
     """Se instala al terminar de definir las rutas existentes de app.py."""
     app=n['app'];login=n['login_requerido']
@@ -2777,8 +2868,20 @@ def _agua_instalar(n):
                     ecmeta['estado']='sin_temperatura'
                     metas=dict(metas,ec=ecmeta)
         guardados=[];errores=[]
+        reporte_bomba = None
+        recibido_bomba = time.monotonic()
+        if 'riego_estado' in data:
+            try:
+                reporte_bomba = _bomba_estado_validar(data['riego_estado'])
+            except (ValueError, TypeError, OverflowError):
+                errores.append('estado de bomba: reporte no valido')
         try:
             with bd() as (_,c):
+                if reporte_bomba is not None:
+                    c.execute('SELECT idDispositivo FROM dispositivos WHERE idDispositivo=%s', (did,))
+                    if not c.fetchone():
+                        reporte_bomba = None
+                        errores.append('estado de bomba: dispositivo no registrado')
                 for raw,vraw in sens.items():
                     tipo=raw.strip().lower()
                     c.execute('SELECT idSensore,unidad_medida FROM sensores WHERE idDispositivo=%s AND LOWER(TRIM(tipo_sensor))=%s ORDER BY idSensore',(did,tipo))
@@ -2799,8 +2902,13 @@ def _agua_instalar(n):
                     except mysql.connector.Error as e:
                         errores.append(tipo+(': ejecutar python app.py --preparar-agua' if e.errno==1146 else ': error al almacenar'))
                     except (ValueError,TypeError,OverflowError) as e:errores.append(f'{tipo}: {e}')
+            if reporte_bomba is not None:
+                _bomba_estado_guardar(did, reporte_bomba, recibido_bomba)
+            else:
+                _bomba_estado_olvidar(did)
             return jsonify(status='parcial' if errores else 'ok',guardados=guardados,errores=errores)
         except Exception:
+            _bomba_estado_olvidar(did)
             app.logger.exception('Error recibiendo sensores');return jsonify(error='No se pudieron recibir los datos'),500
     app.view_functions['arduino_datos']=datos_arduino
 
@@ -3643,6 +3751,9 @@ def consultar_eventos_riego():
 # =====================================================================
 
 EXPORTACION_MAX_FILAS = 50000  # Por hoja. Si se excede, no se entrega un archivo parcial.
+# Hojas extra del Excel que agregan otros módulos (dosificacion.py, 03/11/2026).
+# Cada una recibe (hoja_datos, datos). Si una falla, el Excel se entrega sin ella.
+HOJAS_EXTRA_EXCEL = []
 
 
 class _ErrorExportacion(ValueError):
@@ -3937,6 +4048,11 @@ def _exportar_generar_excel(datos):
         ('config_version', 'Version de configuracion (SHA-256)', 70),
         ('perdidos_total', 'Avisos descartados en este arranque', 32),
     ], eventos_relevador['eventos'])
+    for agregar_hoja in HOJAS_EXTRA_EXCEL:
+        try:
+            agregar_hoja(hoja_datos, datos)
+        except Exception:
+            app.logger.exception('No se pudo agregar una hoja extra al Excel; se entrega sin ella')
     archivo = BytesIO()
     libro.save(archivo)
     archivo.seek(0)
@@ -4077,6 +4193,15 @@ El archivo conserva los valores registrados y los datos faltantes.</p>
 </script></body></html>'''
 
 
+# ── Dosificación asistida (Actividad 2) · 03/11/2026 ──
+# Vive en dosificacion.py. Si falta o falla, el resto del sistema arranca igual.
+try:
+    import dosificacion
+    dosificacion.instalar(globals())
+except Exception as error_dosificacion:
+    print('Dosificación asistida no disponible:', error_dosificacion)
+
+
 if __name__ == '__main__':
     import argparse
     parser=argparse.ArgumentParser(description='Servidor AeroGarden')
@@ -4109,5 +4234,3 @@ if __name__ == '__main__':
             host='0.0.0.0',
             port=int(os.environ.get('PORT', 5000))
         )
-
-

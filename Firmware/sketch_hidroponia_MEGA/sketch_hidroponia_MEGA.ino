@@ -539,6 +539,41 @@ int emparejar() {
 // ================================================================
 // ENVÍO DE DATOS
 // ================================================================
+// Instantanea para explicar el estado en el panel. No modifica decisiones de riego.
+void agregarEstadoBomba(JsonObject estado) {
+    controlarRelay();
+    const uint32_t ahora = (uint32_t)millis();
+    estado["version"] = 1;
+    estado["uptime_ms"] = ahora;
+    estado["encendida"] = bombaEncendida;
+    estado["config_recibida"] = configRecibida && deviceId > 0;
+    estado["calibrando_ec"] = agua.calibrando;
+    estado["modo"] = modoManual ? "manual" : "automatico";
+#if PROTECCION_NIVEL_ACTIVA
+    estado["proteccion_nivel"] = true;
+    const char *situacion = "sin_lectura";
+    switch (nivelAgua.estado()) {
+        case ProteccionNivel::BAJO: situacion = "bajo"; break;
+        case ProteccionNivel::INVALIDO: situacion = "invalido"; break;
+        case ProteccionNivel::VENCIDO: situacion = "vencido"; break;
+        case ProteccionNivel::LISTO: situacion = "listo"; break;
+        default: break;
+    }
+    estado["nivel_estado"] = situacion;
+    float distancia = nivelAgua.distancia(ahora);
+    estado["distancia_cm"] = nullptr;
+    if (isfinite(distancia)) estado["distancia_cm"] = distancia;
+    estado["corte_cm"] = NIVEL_DIST_CORTE_CM;
+    estado["recuperacion_cm"] = NIVEL_DIST_RECUPERACION_CM;
+#else
+    estado["proteccion_nivel"] = false;
+    estado["nivel_estado"] = "desactivada";
+    estado["distancia_cm"] = nullptr;
+    estado["corte_cm"] = nullptr;
+    estado["recuperacion_cm"] = nullptr;
+#endif
+}
+
 void enviarDatos(float temp, float humedad, float dist) {
     long luz=0,ph=0;
     for(int i=0;i<MUESTRAS_ANALOG;++i){
@@ -546,7 +581,7 @@ void enviarDatos(float temp, float humedad, float dist) {
         analogRead(PH_PIN);ph+=analogRead(PH_PIN);
         esperarAtendiendo(DELAY_MUESTRA);
     }
-    StaticJsonDocument<1152> doc;
+    StaticJsonDocument<1536> doc;
     if (DEBUG_SERIAL_ANTERIOR) {
         Serial.print(F("Lecturas -> temperatura="));
         if (isfinite(temp)) Serial.print(temp, 2); else Serial.print(F("ND"));
@@ -570,6 +605,7 @@ void enviarDatos(float temp, float humedad, float dist) {
     if (ENVIAR_AGUA_AL_SERVIDOR) {
         agua.agregar(sensores,unidades,diagnostico);
     }
+    agregarEstadoBomba(doc.createNestedObject("riego_estado"));
     if(doc.overflowed()){Serial.println(F("Paquete demasiado grande"));return;}
     // FIX 09/10/2026: serializar aparte. ArduinoJson 7 borra el String
     // destino antes de escribir; con la 6 se agregaba al final.
