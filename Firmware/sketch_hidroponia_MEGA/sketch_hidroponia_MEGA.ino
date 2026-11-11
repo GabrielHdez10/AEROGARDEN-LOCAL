@@ -975,7 +975,7 @@ void setup() {
     if (millis() < ESPERA_MIN_DHT) esperarAtendiendo(ESPERA_MIN_DHT - millis());
 
     // Intentar leer device_id guardado en EEPROM
-    deviceId = leerDeviceIdEEPROM();
+     deviceId = leerDeviceIdEEPROM();
 
     if (deviceId > 0) {
         Serial.print(F("device_id en EEPROM: ")); Serial.println(deviceId);

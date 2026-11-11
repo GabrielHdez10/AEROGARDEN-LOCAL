@@ -9,7 +9,7 @@ const char* WIFI_PASS = "e0h6i2e5Suip";
 
 // Esta es la IP de la computadora, no la del ESP8266.
 // Mantén python app.py ejecutándose mientras uses el sistema.
-const char* SERVER_HOST = "http://192.168.2.108:5000";
+const char* SERVER_HOST = "http://172.195.106.4";
 
 unsigned long tUltimoIntento = 0;
 const unsigned long REINTENTO_WIFI_MS = 10000UL;
