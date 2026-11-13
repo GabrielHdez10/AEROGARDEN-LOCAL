@@ -1,29 +1,47 @@
+// CORRECCION 13/11/2026: respuestas identificadas para el Mega actualizado.
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClient.h>
 
-// AeroGarden: puente ESP8266 para Flask en la computadora.
-// Escribe la contraseña real de linksys_SUIP antes de cargar.
+// AeroGarden: puente Wi-Fi entre el Arduino Mega y el servidor.
 const char* WIFI_SSID = "linksys_SUIP";
 const char* WIFI_PASS = "e0h6i2e5Suip";
 
-// Esta es la IP de la computadora, no la del ESP8266.
-// Mantén python app.py ejecutándose mientras uses el sistema.
+// Dirección del servidor AeroGarden.
 const char* SERVER_HOST = "http://172.195.106.4";
 
 unsigned long tUltimoIntento = 0;
 const unsigned long REINTENTO_WIFI_MS = 10000UL;
 
-String procesarComando(String cmd);
+const uint16_t HTTP_TIMEOUT_MS = 3000;
+const unsigned int MAX_RESPUESTA_BYTES = 1400;
+
+// Compatible con comandos anteriores y con @<id>:<comando>.
+// El Mega actualizado verificara este identificador en cada respuesta.
+bool leerCabeceraESP(const char *texto, uint32_t &id, uint8_t &longitud) {
+    if (!texto || texto[0] != '@') return false;
+    uint32_t valor = 0;
+    uint8_t i = 1;
+    while (texto[i] >= '0' && texto[i] <= '9') {
+        uint8_t digito = (uint8_t)(texto[i] - '0');
+        if (i > 10 || valor > (UINT32_MAX - digito) / 10U) return false;
+        valor = valor * 10U + digito;
+        ++i;
+    }
+    if (i == 1 || texto[i] != ':' || valor == 0) return false;
+    id = valor;
+    longitud = i + 1;
+    return true;
+}
+
+String procesarComando(const String &cmd);
 
 void setup() {
     // Enlace con el Mega: debe coincidir con BAUD_ESP.
     Serial.begin(115200);
     delay(200);
 
-    Serial.println("=== ESP8266 Puente WiFi LOCAL ===");
-    Serial.print("Conectando a ");
-    Serial.println(WIFI_SSID);
+    // Este puerto es el protocolo con el Mega: sin mensajes libres de arranque.
 
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
@@ -50,19 +68,34 @@ void loop() {
 
         if (linea == "PING") {
             Serial.println(WiFi.status() == WL_CONNECTED
-                           ? "{\"pong\":true,\"wifi\":true}"
-                           : "{\"pong\":true,\"wifi\":false}");
+                           ? "{\"pong\":true,\"wifi\":true,\"rpc\":1}"
+                           : "{\"pong\":true,\"wifi\":false,\"rpc\":1}");
             return;
         }
 
-        Serial.println(procesarComando(linea));
+        // Mantiene compatibilidad con el Mega anterior durante la actualizacion.
+        uint32_t solicitud = 0;
+        uint8_t cabecera = 0;
+        bool conId = linea.startsWith("@");
+        if (conId) {
+            if (!leerCabeceraESP(linea.c_str(), solicitud, cabecera)) {
+                Serial.println("{\"error\":\"cabecera_rpc_invalida\"}");
+                return;
+            }
+            linea.remove(0, cabecera);
+        }
+        String respuesta = procesarComando(linea);
+        if (conId) {
+            Serial.print('@'); Serial.print(solicitud); Serial.print(':');
+        }
+        Serial.println(respuesta);
     }
 }
 
 // Comandos del Mega:
 // GET:/ruta
 // POST:/ruta:{"campo":"valor"}
-String procesarComando(String cmd) {
+String procesarComando(const String &cmd) {
     if (WiFi.status() != WL_CONNECTED) {
         return "{\"error\":\"sin_wifi\"}";
     }
@@ -89,14 +122,14 @@ String procesarComando(String cmd) {
 
     String url = String(SERVER_HOST) + endpoint;
 
-    // Flask local utiliza HTTP: cliente sin TLS.
+    // El servidor configurado utiliza HTTP.
     WiFiClient cliente;
     HTTPClient http;
 
     if (!http.begin(cliente, url)) {
         return "{\"error\":\"http_begin\"}";
     }
-    http.setTimeout(8000);
+    http.setTimeout(HTTP_TIMEOUT_MS);
 
     int httpCode = -1;
     String payload = "";
@@ -108,10 +141,17 @@ String procesarComando(String cmd) {
         httpCode = http.GET();
     }
 
-    if (httpCode > 0) {
+    if (httpCode >= 200 && httpCode < 300) {
         payload = http.getString();
         payload.replace("\n", "");
         payload.replace("\r", "");
+        if (payload.length() == 0) {
+            payload = "{\"error\":\"http_sin_contenido\"}";
+        } else if (payload.length() > MAX_RESPUESTA_BYTES) {
+            payload = "{\"error\":\"respuesta_demasiado_grande\"}";
+        }
+    } else if (httpCode > 0) {
+        payload = "{\"error\":\"http_status_" + String(httpCode) + "\"}";
     } else {
         payload = "{\"error\":\"http_" + String(httpCode) + "\"}";
     }

@@ -39,6 +39,15 @@
 
 // ── Muestreo ────────────────────────────────────────────────
 #define INTERVALO_DATOS   10000UL  // ms entre envíos al servidor
+
+// Órdenes de la bomba: el .ino corregido usa un reloj independiente.
+#define INTERVALO_CONFIG_MS        2000UL  // ms entre consultas terminadas
+// El .ino corregido corta el encendido manual sin configuración vigente.
+#define MANUAL_MAX_SIN_CONFIG_MS  30000UL
+
+static_assert(INTERVALO_CONFIG_MS > 0 &&
+              MANUAL_MAX_SIN_CONFIG_MS > INTERVALO_CONFIG_MS,
+              "Revisa los tiempos de consulta y vigencia manual.");
 #define MUESTRAS_ANALOG   10       // lecturas a promediar
 #define DELAY_MUESTRA     10       // ms entre cada muestra
 
@@ -98,7 +107,13 @@ static_assert(NIVEL_DIST_CORTE_CM > NIVEL_DIST_RECUPERACION_CM,
 // ── Comunicación ────────────────────────────────────────────
 #define BAUD_DEBUG        9600     // Serial: monitor USB
 #define BAUD_ESP          115200   // Serial1: enlace con el ESP8266
-#define TIMEOUT_ESP       8000     // ms de espera por respuesta
+// El puente corregido usará 3000 ms de timeout de inactividad HTTP.
+// Este margen no es una garantía de duración total de la petición.
+// El .ino corregido también identificará las respuestas y controlará la vigencia.
+#define TIMEOUT_ESP       12000    // ms de espera por respuesta completa
+static_assert(TIMEOUT_ESP > 0 && TIMEOUT_ESP < 32768 &&
+              TIMEOUT_ESP < MANUAL_MAX_SIN_CONFIG_MS,
+              "El timeout debe caber en int del Mega y ser menor que la vigencia manual.");
 #define ESPERA_ESP_MAX    20000    // ms MÁXIMOS esperando a que el ESP conecte al WiFi
                                    // (ya no es una espera fija: se sale en cuanto el ESP responde "listo")
 #define PING_ESP_INTERVALO 500     // ms entre PING al ESP mientras se espera

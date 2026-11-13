@@ -1,3 +1,6 @@
+// CORRECCION 13/11/2026: ordenes prioritarias, respuestas con identificador
+// y apagado manual por falta de configuracion vigente. Usar tambien el
+// puente ESP8266 corregido. Mantener los archivos privados del proyecto.
 // AEROGARDEN: paso 1, DS18B20 y TDS dentro de este mismo archivo.
 // ACTIVIDAD 2 - 26/10/2026: integra registro_riego.h y prepara el envio
 // de avisos confirmados. Requiere ese .h junto a este .ino.
@@ -38,9 +41,109 @@
 
 #include <DHT.h>
 #include <EEPROM.h>
+#include <ArduinoJson.h>  // JsonObject debe existir antes de los prototipos automaticos.
 #include "config.h"
+
+#ifndef INTERVALO_CONFIG_MS
+#error "Instala el config.h corregido: falta INTERVALO_CONFIG_MS."
+#endif
+#ifndef MANUAL_MAX_SIN_CONFIG_MS
+#error "Instala el config.h corregido: falta MANUAL_MAX_SIN_CONFIG_MS."
+#endif
+
 #include "registro_riego.h"
 #include "secrets.h"
+
+// Helpers de comunicacion y vigencia incluidos en este mismo archivo.
+#include <stdint.h>
+
+// Cada intercambio usa @<id>:<mensaje>\n en el enlace Mega <-> ESP8266.
+// Una respuesta tardia no puede confirmar una solicitud distinta.
+inline bool leerCabeceraESP(const char *texto, uint32_t &id, uint8_t &longitud) {
+    if (!texto || texto[0] != '@') return false;
+    uint32_t valor = 0;
+    uint8_t i = 1;
+    while (texto[i] >= '0' && texto[i] <= '9') {
+        uint8_t digito = (uint8_t)(texto[i] - '0');
+        if (i > 10 || valor > (UINT32_MAX - digito) / 10U) return false;
+        valor = valor * 10U + digito;
+        ++i;
+    }
+    if (i == 1 || texto[i] != ':' || valor == 0) return false;
+    id = valor;
+    longitud = i + 1;
+    return true;
+}
+
+class FiltroRespuestaESP {
+public:
+    enum Accion : uint8_t { IGNORAR, GUARDAR, COMPLETA };
+    explicit FiltroRespuestaESP(uint32_t esperado) : esperado_(esperado) {}
+
+    Accion recibir(char c) {
+        if (c == '\n') {
+            bool completa = fase_ == DATOS && coincide_;
+            fase_ = INICIO;
+            recibido_ = 0;
+            digitos_ = 0;
+            coincide_ = false;
+            return completa ? COMPLETA : IGNORAR;
+        }
+        if (fase_ == INICIO) {
+            fase_ = c == '@' ? NUMERO : DESCARTAR;
+        } else if (fase_ == NUMERO) {
+            if (c >= '0' && c <= '9') {
+                uint8_t d = (uint8_t)(c - '0');
+                if (++digitos_ > 10 || recibido_ > (UINT32_MAX - d) / 10U)
+                    fase_ = DESCARTAR;
+                else recibido_ = recibido_ * 10U + d;
+            } else if (c == ':' && digitos_ && recibido_ != 0) {
+                coincide_ = recibido_ == esperado_;
+                fase_ = DATOS;
+            } else fase_ = DESCARTAR;
+        } else if (fase_ == DATOS && coincide_ && c != '\r') {
+            return GUARDAR;
+        }
+        return IGNORAR;
+    }
+
+private:
+    enum Fase : uint8_t { INICIO, NUMERO, DATOS, DESCARTAR };
+    uint32_t esperado_, recibido_ = 0;
+    uint8_t digitos_ = 0;
+    Fase fase_ = INICIO;
+    bool coincide_ = false;
+};
+
+#include <stdint.h>
+
+// La bomba no conserva indefinidamente un encendido manual sin comunicacion.
+// El bloqueo queda retenido para que una respuesta vieja de encendido no la
+// reactive. Se libera al recibir apagado manual o un cambio a automatico.
+class VigenciaManual {
+public:
+    explicit VigenciaManual(uint32_t limiteMs) : limite_(limiteMs) {}
+
+    void confirmar(uint32_t ahora, bool manual, bool encender) {
+        ultima_ = ahora;
+        tiene_ = true;
+        if (!manual || !encender) bloqueada_ = false;
+    }
+
+    bool bloquear(uint32_t ahora, bool manual, bool encender) {
+        if (manual && encender &&
+            (!tiene_ || (uint32_t)(ahora - ultima_) >= limite_))
+            bloqueada_ = true;
+        return manual && encender && bloqueada_;
+    }
+
+    bool bloqueada() const { return bloqueada_; }
+
+private:
+    uint32_t limite_, ultima_ = 0;
+    bool tiene_ = false, bloqueada_ = false;
+};
+
 // PASO 1 — integración en un único .ino (06/10/2026).
 // Usar config.h con parametros de nivel, registro_riego.h actualizado y secrets.h.
 // Bibliotecas: DHT, OneWire, DallasTemperature y ArduinoJson (6.21.5 o 7.x).
@@ -48,7 +151,7 @@
 // Los datos de agua se prueban localmente hasta revisar servidor/unidades.
 // NO activar envío de agua hasta instalar el soporte del protocolo 2.
 #define ENVIAR_AGUA_AL_SERVIDOR 1
-#define DEBUG_SERIAL_ANTERIOR 1
+#define DEBUG_SERIAL_ANTERIOR 0
 #ifndef AGUA_PIN
 #define AGUA_PIN 7
 #endif
@@ -66,7 +169,6 @@
 #define AEROGARDEN_AGUA_H
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include <ArduinoJson.h>
 #include <EEPROM.h>
 #include <math.h>
 
@@ -252,6 +354,8 @@ unsigned long tCambioRelay = 0;
 // ─────────────────────────────────────────────────────────────
 
 unsigned long ultimoCiclo = 0;
+uint32_t ultimaConsultaConfig = 0;
+VigenciaManual vigenciaManual(MANUAL_MAX_SIN_CONFIG_MS);
 
 // La cola guarda avisos; controlarRelay() nunca hace peticiones de red.
 RegistroRiego registroRiego;
@@ -443,45 +547,51 @@ void vaciarDebug() {
     while (Serial.availableForWrite() < SERIAL_TX_BUFFER_SIZE - 1) controlarRelay();
 }
 
-String enviarAlESP32(String cmd, int timeoutMs = TIMEOUT_ESP) {
-    // FIX 09/10/2026: el debug va ANTES de enviar. Así, cuando el ESP
-    // empieza a contestar, el Mega ya no está ocupado imprimiendo a 9600.
+String enviarAlESP32(const String &cmd, int timeoutMs = TIMEOUT_ESP) {
+    static uint32_t siguienteSolicitud = 0;
+    if (++siguienteSolicitud == 0) ++siguienteSolicitud;
+    const uint32_t solicitud = siguienteSolicitud;
     if (DEBUG_SERIAL_ANTERIOR) {
-        Serial.print(F("[->ESP32] "));
+        Serial.print(F("[->ESP8266] "));
         imprimirSeguro(cmd);
     }
     vaciarDebug();
-
-    // Limpiar buffer
     while (Serial1.available()) Serial1.read();
 
-    for (unsigned int i=0; i<cmd.length(); ++i) {
-        while (Serial1.availableForWrite()==0) atenderLocal();
+    // El ESP devuelve este identificador en SU respuesta. Las respuestas
+    // atrasadas de sensores o eventos no pueden sustituir la configuracion.
+    Serial1.print('@');
+    Serial1.print(solicitud);
+    Serial1.print(':');
+    for (unsigned int i = 0; i < cmd.length(); ++i) {
+        while (Serial1.availableForWrite() == 0) atenderLocal();
         Serial1.write(cmd[i]);
     }
     Serial1.println();
 
-    // Mientras llega la respuesta, NADA que bloquee: solo el relay.
-    // agua.update() puede tardar más de 5 ms (búsqueda del DS18B20)
-    // y en ese tiempo se desbordaría el buffer de 63 bytes de Serial1.
-    String resp = "";
-    unsigned long t = millis();
-    while (millis() - t < (unsigned long)timeoutMs) {
+    FiltroRespuestaESP filtro(solicitud);
+    String resp;
+    unsigned long inicio = millis();
+    while ((unsigned long)(millis() - inicio) < (unsigned long)timeoutMs) {
         controlarRelay();
         while (Serial1.available()) {
-            char c = Serial1.read();
-            if (resp.length() < 1500) resp += c;
-            else return "";
-            if (c == '\n') goto done;
+            char c = (char)Serial1.read();
+            FiltroRespuestaESP::Accion accion = filtro.recibir(c);
+            if (accion == FiltroRespuestaESP::GUARDAR) {
+                if (resp.length() >= 1500) {
+                    imprimirSeguro(F("ESP8266: respuesta demasiado grande; rechazada."));
+                    return "";
+                }
+                resp += c;
+            }
+            if (accion == FiltroRespuestaESP::COMPLETA) {
+                resp.trim();
+                return resp;
+            }
         }
     }
-    done:
-    resp.trim();
-    if (DEBUG_SERIAL_ANTERIOR) {
-        Serial.print(F("[ESP32->] "));
-        Serial.println(resp);
-    }
-    return resp;
+    imprimirSeguro(String(F("ESP8266: sin respuesta completa para solicitud ")) + String(solicitud));
+    return "";
 }
 
 // ================================================================
@@ -523,7 +633,7 @@ int emparejar() {
                   "\"pairing_code\":\"" + String(PAIRING_CODE) + "\"}";
 
     String cmd = "POST:/api/arduino/emparejar:" + body;
-    String resp = enviarAlESP32(cmd, 10000);
+    String resp = enviarAlESP32(cmd, TIMEOUT_ESP);
 
     // Parsear device_id de la respuesta JSON
     int idx = resp.indexOf("\"device_id\":");
@@ -546,7 +656,7 @@ void agregarEstadoBomba(JsonObject estado) {
     estado["version"] = 1;
     estado["uptime_ms"] = ahora;
     estado["encendida"] = bombaEncendida;
-    estado["config_recibida"] = configRecibida && deviceId > 0;
+    estado["config_recibida"] = configRecibida && deviceId > 0 && !vigenciaManual.bloqueada();
     estado["calibrando_ec"] = agua.calibrando;
     estado["modo"] = modoManual ? "manual" : "automatico";
 #if PROTECCION_NIVEL_ACTIVA
@@ -612,7 +722,7 @@ void enviarDatos(float temp, float humedad, float dist) {
     String json;
     serializeJson(doc,json);
     String cmd="POST:/api/arduino/datos:"+json;
-    String respuesta=enviarAlESP32(cmd,10000);
+    String respuesta=enviarAlESP32(cmd,TIMEOUT_ESP);
     if (DEBUG_SERIAL_ANTERIOR) {
         Serial.print(F("Resp datos: "));
         Serial.println(respuesta);
@@ -703,7 +813,7 @@ void enviarEventoRiego() {
     {
         String json;
         serializeJson(doc, json);
-        respuesta = enviarAlESP32("POST:/api/arduino/riego/evento:" + json, 10000);
+        respuesta = enviarAlESP32("POST:/api/arduino/riego/evento:" + json, TIMEOUT_ESP);
     }
     doc.clear();
     bool confirmado = false;
@@ -740,7 +850,7 @@ void pedirConfig() {
     }
     StaticJsonDocument<768> doc;
     if(respuesta.length()==0){
-        imprimirSeguro(F("Bomba: sin respuesta de configuracion. Se conserva el estado de control anterior."));
+        imprimirSeguro(F("Bomba: sin respuesta de configuracion; se aplica vigencia manual."));
         return;
     }
     DeserializationError error=deserializeJson(doc,respuesta);
@@ -782,6 +892,7 @@ void pedirConfig() {
     }
     tiempoOn=on;tiempoOff=off;modoManual=nuevoManual;estadoManual=strcmp(estado,"encendido")==0;
     configRecibida=true;
+    vigenciaManual.confirmar((uint32_t)millis(), modoManual, estadoManual);
     const char *version = r["config_version"].is<const char*>()
                           ? r["config_version"].as<const char*>() : nullptr;
     registroRiego.configurar((uint16_t)tiempoOn, (uint16_t)tiempoOff,
@@ -820,7 +931,7 @@ void controlarRelay() {
 #if PROTECCION_NIVEL_ACTIVA
     actualizarNivel(); // Sin esperas de eco; tambien durante las respuestas del ESP.
 #endif
-    // modo: 0 calibracion, 1 esperando app.py, 2 manual, 3 auto, 4 bloqueo por nivel
+    // modo: 0 calibracion, 1 sin config, 2 manual, 3 auto, 4 nivel, 5 manual vencido
     static uint8_t modoPrevio = 1;
     static uint8_t avisado = 0xFF;              // último estado impreso
     static int onAvisado = -1, offAvisado = -1;
@@ -838,6 +949,9 @@ void controlarRelay() {
     else if (modoManual)                        modo = 2;
     else                                        modo = 3;
 
+    if (vigenciaManual.bloquear((uint32_t)ahora, modoManual, estadoManual) && modo == 2)
+        modo = 5;
+
 #if PROTECCION_NIVEL_ACTIVA
     bool bloqueadoNivel = nivelAgua.bloqueado();
     if (nivelBloqueoAnterior && !bloqueadoNivel) {
@@ -851,7 +965,7 @@ void controlarRelay() {
     if (bloqueadoNivel) modo = 4;
 #endif
 
-    if (modo == 4) {
+    if (modo == 4 || modo == 5) {
         bombaEncendida = false;
         tCambioRelay = ahora; // No acumular tiempo de una fase mientras esta bloqueada.
     } else if (modo <= 1) {
@@ -871,7 +985,7 @@ void controlarRelay() {
     modoPrevio = modo;
     digitalWrite(RELAY_PIN, bombaEncendida ? RELAY_ON : RELAY_OFF);
     RegistroRiego::Motivo motivo = modo == 0 ? RegistroRiego::CALIBRACION :
-                                  modo == 1 ? RegistroRiego::ESPERA :
+                                  (modo == 1 || modo == 5) ? RegistroRiego::ESPERA :
                                   modo == 2 ? RegistroRiego::MANUAL : RegistroRiego::CICLO;
 #if PROTECCION_NIVEL_ACTIVA
     if (modo == 4) motivo = motivoNivel();
@@ -883,7 +997,7 @@ void controlarRelay() {
 
     // Aviso por monitor serie: solo si algo cambió y el buffer USB está
     // vacío; si no, se reintenta en la siguiente llamada.
-    uint8_t estado = modo * 2 + (bombaEncendida ? 1 : 0);
+    uint8_t estado = modo == 5 ? 20 : modo * 2 + (bombaEncendida ? 1 : 0);
 #if PROTECCION_NIVEL_ACTIVA
     if (modo == 4) estado = 8 + (uint8_t)nivelAgua.estado();
 #endif
@@ -904,6 +1018,10 @@ void controlarRelay() {
         return;
     }
 #endif
+    if (modo == 5) {
+        Serial.println(F(" (sin config vigente; enviar Apagar para liberar)"));
+        return;
+    }
     if (modo == 0) { Serial.println(F(" (calibracion EC)")); return; }
     if (modo == 1) {
         Serial.println(deviceId <= 0 ? F(": sin device_id valido")
@@ -992,6 +1110,7 @@ void setup() {
     // Consultar la orden de la bomba antes del primer envio de sensores.
     // Si falla, pedirConfig conserva el control anterior y loop reintenta.
     if (deviceId > 0) pedirConfig();
+    ultimaConsultaConfig = millis();
 
     // Que el primer envio ocurra ya, sin esperar los 10 s del intervalo
     ultimoCiclo = millis() - INTERVALO_DATOS;
@@ -1000,6 +1119,14 @@ void setup() {
 // ================================================================
 // LOOP
 // ================================================================
+void consultarConfigSiCorresponde() {
+    uint32_t ahora = (uint32_t)millis();
+    if (deviceId > 0 && (uint32_t)(ahora - ultimaConsultaConfig) >= INTERVALO_CONFIG_MS) {
+        pedirConfig();
+        ultimaConsultaConfig = (uint32_t)millis();
+    }
+}
+
 void loop() {
     atenderLocal();
     agua.informar();
@@ -1011,6 +1138,7 @@ void loop() {
         return;
     }
 
+    consultarConfigSiCorresponde(); // Las ordenes tienen prioridad sobre telemetria.
     unsigned long ahora = millis();
     if (ahora - ultimoCiclo >= INTERVALO_DATOS) {
         ultimoCiclo = ahora;
@@ -1031,10 +1159,12 @@ void loop() {
 
         // Una falla del DHT22 no detiene los demás sensores.
         enviarDatos(temp, humedad, dist);
-        pedirConfig();
+        consultarConfigSiCorresponde();
     }
 
+    consultarConfigSiCorresponde();
     enviarEventoRiego(); // Red fuera de controlarRelay(); un aviso por iteracion.
+    consultarConfigSiCorresponde();
     controlarRelay();
 }
 // Las esperas de red y muestreo mantienen el riego y el DS18B20 activos.
