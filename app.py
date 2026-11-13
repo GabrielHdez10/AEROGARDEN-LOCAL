@@ -177,8 +177,21 @@ def get_id_usuario():
         return None
 
 
-relay_configs: dict = {}   
-relay_lock = threading.Lock()
+# MySQL comparte la configuracion de riego entre todos los procesos de Gunicorn.
+
+
+class ErrorConfiguracionRelay(RuntimeError):
+    """No hay una lectura fiable de la configuracion del relevador."""
+
+
+@app.errorhandler(ErrorConfiguracionRelay)
+def error_configuracion_relay(error):
+    # El Mega rechaza una respuesta sin relay y conserva su control anterior.
+    return jsonify({
+        "status": "error",
+        "error": "No se pudo consultar la configuracion de la bomba en MySQL. "
+                 "El controlador conserva la ultima configuracion valida.",
+    }), 503
 
 wifi_pendiente: dict = {}  
 wifi_actual:    dict = {}  
@@ -192,9 +205,8 @@ def _relay_default():
 
 
 def get_relay(device_id: int) -> dict:
-    with relay_lock:
-        if device_id in relay_configs:
-            return relay_configs[device_id].copy()
+    """Lee la orden confirmada en MySQL en cada consulta del panel o del Mega."""
+    cx = cur = None
     try:
         cx  = conectar_bd()
         cur = cx.cursor(dictionary=True)
@@ -205,7 +217,6 @@ def get_relay(device_id: int) -> dict:
             LIMIT 1
         """, (device_id,))
         row = cur.fetchone()
-        cur.close(); cx.close()
         if row:
             config = {
                 "tiempo_on":     row["tiempo_on"],
@@ -215,11 +226,11 @@ def get_relay(device_id: int) -> dict:
             }
         else:
             config = _relay_default()
-    except Exception as e:
-        print(f"[RELAY get_relay] Error BD: {e} — usando defaults")
-        config = _relay_default()
-    with relay_lock:
-        relay_configs[device_id] = config
+    except Exception as error:
+        app.logger.exception("No se pudo leer la configuracion de la bomba en MySQL")
+        raise ErrorConfiguracionRelay() from error
+    finally:
+        _relay_cerrar_recursos(cur, cx)
     return config.copy()
 
 
@@ -301,13 +312,11 @@ def set_relay(device_id: int, data: dict, id_usuario=None):
                 cx.rollback()
             except Exception:
                 app.logger.warning("No se pudo revertir la transaccion del relevador", exc_info=True)
-        # El llamador debe conocer el fallo; no actualizar la configuracion en memoria.
+        # El llamador debe conocer el fallo; solo se confirma despues del commit.
         raise
     finally:
         _relay_cerrar_recursos(cur, cx)
-    # Solo publicar en memoria despues de que MySQL confirme commit.
-    with relay_lock:
-        relay_configs[device_id] = config.copy()
+    # Los demas procesos leeran este valor confirmado en su siguiente consulta.
     return config.copy()
 
 
