@@ -294,6 +294,23 @@
             .panel-izq { display: none; }
             .panel-der { padding: 36px 20px; }
         }
+
+        /* RESPONSIVE-2026-11-13: ajustes extra para cualquier pantalla. */
+        .logo-box img { max-width: 100%; }
+        @media (max-width: 1024px) {
+            .panel-izq { padding: 48px 32px; }
+            .panel-izq .contenido h2 { font-size: 1.9rem; }
+        }
+        @media (max-width: 480px) {
+            .panel-der { padding: 28px 16px; }
+            .logo-box { margin-bottom: 22px; }
+            .form-titulo { font-size: 1.4rem; }
+            /* Apellido paterno y materno: uno debajo del otro. */
+            #paso-datos > div[style*="grid-template-columns"] {
+                grid-template-columns: 1fr !important;
+                gap: 16px !important;
+            }
+        }
     </style>
 </head>
 <body>

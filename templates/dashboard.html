@@ -825,6 +825,127 @@
         .aviso-bomba[data-tono="alerta"] { border-color: #c0392b; background: #fff0ed; color: #8e2b21; }
         .aviso-bomba[data-tono="precaucion"] { border-color: #b9770e; background: #fff7e0; color: #77520c; }
         .aviso-bomba[data-tono="bien"] { border-color: #287454; background: #edf8f1; color: #205d43; }
+
+        /* ============================================================ */
+        /* RESPONSIVE-2026-11-13 (inicio)                                */
+        /* Solo reglas de adaptación a pantalla. No cambia colores,      */
+        /* textos, lógica ni el aspecto en escritorio (>= 1400 px).      */
+        /* ============================================================ */
+
+        /* Nada puede ser más ancho que su contenedor. */
+        img, canvas, iframe { max-width: 100%; }
+        .inicio-grid > *, .alertas-grid > *, .kpi-grid > * { min-width: 0; }
+
+        /* -- Menú: si los botones no caben, la barra se desliza de lado
+              en vez de empujar la página. -- */
+        @media (max-width: 1399px) {
+            nav {
+                overflow-x: auto;
+                overflow-y: hidden;
+                scrollbar-width: none;
+                -webkit-overflow-scrolling: touch;
+            }
+            nav::-webkit-scrollbar { display: none; }
+            nav button { flex-shrink: 0; }
+        }
+
+        /* -- Laptop chica / tablet horizontal -- */
+        @media (max-width: 1279px) {
+            .nav-logo { margin-right: 4px; }
+            .nav-logo-texto { display: none; }
+            .nav-divider { margin: 0 6px; }
+            .nav-logout span { display: none; }
+            /* "Cerrar sesión" se queda fijo a la derecha (solo el icono).
+               ::before tapa los botones que pasan por debajo al deslizar;
+               ::after conserva el fondo del botón y su rojo al pasar el cursor. */
+            .nav-logout {
+                position: sticky;
+                right: 0;
+                z-index: 2;
+                padding: 9px 11px;
+            }
+            .nav-logout::before, .nav-logout::after {
+                content: '';
+                position: absolute;
+                z-index: -1;
+                pointer-events: none;
+            }
+            .nav-logout::before {
+                top: -20px; bottom: -20px; left: -26px; right: -18px;
+                background: linear-gradient(90deg, rgba(43,102,76,0) 0, #2b664c 20px, #2d6a4f 100%);
+            }
+            .nav-logout::after {
+                inset: -1.5px;
+                border-radius: 8px;
+                border: 1.5px solid rgba(255,255,255,0.25);
+                background: rgba(255,255,255,0.06);
+                transition: all 0.18s ease;
+            }
+            .nav-logout:hover::after { background: #e74c3c; border-color: #e74c3c; }
+        }
+
+        /* -- Tablet vertical y celular -- */
+        @media (max-width: 900px) {
+            /* Tablas que arma dashboard.js: se deslizan dentro de su caja. */
+            #lista-miembros, #tabla-cultivos-modal, #tabla-cosechas-modal,
+            #tabla-parametros-alerta, #tabla-cultivos-seccion, #tabla-cosechas-seccion,
+            #tabla-reporte-cultivos, #tabla-reporte-cosechas {
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+            th { white-space: nowrap; }
+
+            /* Rejillas escritas en el atributo style: pasan a una columna. */
+            .seccion [style*="grid-template-columns"],
+            .modal [style*="grid-template-columns"] {
+                grid-template-columns: minmax(0, 1fr) !important;
+            }
+            /* Las tarjetas de resumen de los reportes caben de dos en dos. */
+            #kpi-reporte-cultivos, #kpi-reporte-cosechas {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+            }
+            .seccion [style*="grid-template-columns"] select { width: 100% !important; }
+
+            /* Modales: nunca más altos que la pantalla. */
+            .modal-overlay { padding: 12px; }
+            .modal, .modal-wide { max-width: 100%; max-height: 92vh; overflow-y: auto; }
+        }
+
+        @media (max-width: 768px) {
+            nav { height: 56px; padding: 0 10px; }
+            .nav-logo img { height: 40px; width: 40px; }
+
+            .seccion, #dashboard-contenido { padding: 16px 12px; }
+            .seccion h1, #dashboard-contenido h1 { font-size: 21px; margin-bottom: 14px; }
+            .card { padding: 14px; }
+            .modal { padding: 18px 16px; }
+            .modal-botones { flex-wrap: wrap; }
+
+            .inicio-avatar { width: 56px; height: 56px; font-size: 22px; }
+            .inicio-saludo { font-size: 20px; }
+            .kpi-card { padding: 14px; gap: 12px; }
+            .kpi-icono { width: 56px; height: 56px; font-size: 24px; }
+            .kpi-valor { font-size: 24px; }
+
+            .tab-btn { padding: 8px 12px; font-size: 13px; }
+            td, th { padding: 9px 10px; }
+            td { font-size: 13px; }
+            .panel-titulo, .inicio-panel-header { gap: 8px; flex-wrap: wrap; }
+
+            /* Avisos emergentes: ocupan el ancho del celular. */
+            #toast-contenedor { top: 10px; right: 10px; left: 10px; }
+            #toast-contenedor > * { min-width: 0 !important; max-width: 100% !important; }
+
+            #marco-nutrientes { height: calc(100vh - 88px) !important; min-height: 420px !important; }
+        }
+
+        @media (max-width: 500px) {
+            #kpi-reporte-cultivos, #kpi-reporte-cosechas {
+                grid-template-columns: minmax(0, 1fr) !important;
+            }
+            #tab-parametros > div:first-child { flex-wrap: wrap; gap: 8px; }
+        }
+        /* RESPONSIVE-2026-11-13 (fin) */
     </style>
 </head>
 <body>

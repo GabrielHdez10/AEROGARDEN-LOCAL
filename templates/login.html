@@ -339,6 +339,18 @@
             .panel-izq { display: none; }
             .panel-der { padding: 40px 24px; }
         }
+
+        /* RESPONSIVE-2026-11-13: ajustes extra para cualquier pantalla. */
+        .logo-box img { max-width: 100%; }
+        @media (max-width: 1024px) {
+            .panel-izq { padding: 48px 32px; }
+            .panel-izq .tagline h1 { font-size: 2.1rem; }
+        }
+        @media (max-width: 480px) {
+            .panel-der { padding: 28px 16px; }
+            .logo-box { margin-bottom: 24px; }
+            .form-titulo { font-size: 1.4rem; }
+        }
     </style>
 </head>
 <body>
